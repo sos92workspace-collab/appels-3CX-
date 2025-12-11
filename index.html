@@ -78,6 +78,10 @@
       cursor: pointer;
     }
     .dropzone:hover { border-color: var(--accent); }
+    .dropzone.dragging {
+      border-color: var(--accent);
+      background: rgba(34, 197, 94, 0.05);
+    }
     .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0.8rem; }
     .kpi { padding: 0.8rem; border-radius: 10px; border: 1px solid var(--border); background: #0b1221; }
     .kpi .label { color: var(--muted); font-size: 0.9rem; }
@@ -202,7 +206,18 @@
     document.getElementById('save-local').addEventListener('click', saveToLocalStorage);
     document.getElementById('clear-local').addEventListener('click', clearLocalStorage);
 
-    document.querySelector('.dropzone').addEventListener('click', () => fileInput.click());
+    const dropzone = document.querySelector('.dropzone');
+    dropzone.addEventListener('click', () => fileInput.click());
+    dropzone.addEventListener('dragover', (event) => {
+      event.preventDefault();
+      dropzone.classList.add('dragging');
+    });
+    dropzone.addEventListener('dragleave', () => dropzone.classList.remove('dragging'));
+    dropzone.addEventListener('drop', (event) => {
+      event.preventDefault();
+      dropzone.classList.remove('dragging');
+      handleFiles(event.dataTransfer.files);
+    });
 
     function handleFiles(files) {
       if (!files || !files.length) return;
