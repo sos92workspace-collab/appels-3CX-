@@ -1,0 +1,543 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Analyse locale des appels 3CX</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet" />
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #0f172a;
+      --card: #1e293b;
+      --border: #334155;
+      --text: #e2e8f0;
+      --accent: #22c55e;
+      --muted: #94a3b8;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: 'Inter', system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+    header {
+      padding: 1.5rem 2rem;
+      border-bottom: 1px solid var(--border);
+      background: rgba(15, 23, 42, 0.9);
+      position: sticky;
+      top: 0;
+      backdrop-filter: blur(8px);
+      z-index: 10;
+    }
+    h1 { margin: 0 0 0.3rem; font-size: 1.8rem; }
+    p.subtitle { margin: 0; color: var(--muted); }
+    main { padding: 1.5rem 2rem 3rem; display: grid; gap: 1rem; }
+    section { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 1rem 1.25rem; }
+    h2 { margin-top: 0; }
+    .grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+    .controls { display: flex; gap: 0.75rem; flex-wrap: wrap; }
+    .chip {
+      background: #0b1221;
+      border: 1px solid var(--border);
+      padding: 0.6rem 0.9rem;
+      border-radius: 10px;
+      flex: 1;
+      min-width: 220px;
+    }
+    label { display: block; margin-bottom: 0.4rem; font-weight: 600; }
+    input, select, button {
+      width: 100%;
+      padding: 0.65rem 0.75rem;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: #0b1221;
+      color: var(--text);
+    }
+    button.primary {
+      background: var(--accent);
+      color: #06240d;
+      font-weight: 700;
+      border: none;
+      cursor: pointer;
+      transition: transform 0.1s ease;
+    }
+    button.primary:active { transform: translateY(1px); }
+    .dropzone {
+      border: 1.5px dashed var(--border);
+      border-radius: 12px;
+      padding: 1rem;
+      text-align: center;
+      background: #0b1221;
+      cursor: pointer;
+    }
+    .dropzone:hover { border-color: var(--accent); }
+    .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0.8rem; }
+    .kpi { padding: 0.8rem; border-radius: 10px; border: 1px solid var(--border); background: #0b1221; }
+    .kpi .label { color: var(--muted); font-size: 0.9rem; }
+    .kpi .value { font-size: 1.4rem; font-weight: 700; margin-top: 0.2rem; }
+    table { width: 100%; border-collapse: collapse; margin-top: 0.5rem; }
+    th, td { padding: 0.55rem 0.65rem; text-align: left; border-bottom: 1px solid var(--border); }
+    th { color: var(--muted); font-weight: 700; }
+    tbody tr:hover { background: rgba(255, 255, 255, 0.03); }
+    .muted { color: var(--muted); }
+    .badge { padding: 0.2rem 0.45rem; border-radius: 6px; font-weight: 700; font-size: 0.85rem; }
+    .badge.success { background: rgba(34, 197, 94, 0.15); color: #4ade80; }
+    .badge.warn { background: rgba(234, 179, 8, 0.15); color: #fbbf24; }
+    .actions { display: flex; gap: 0.75rem; flex-wrap: wrap; }
+    .chart-wrapper { position: relative; height: 260px; }
+    @media (max-width: 680px) { header { position: static; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Analyse locale des appels 3CX</h1>
+    <p class="subtitle">Chargez vos CSV, analysez hors-ligne, exportez et sauvegardez vos données directement dans le navigateur.</p>
+  </header>
+
+  <main>
+    <section>
+      <h2>1) Importer les CSV</h2>
+      <div class="grid">
+        <label class="dropzone">
+          <input id="file-input" type="file" accept=".csv" multiple style="display:none" />
+          Glissez-déposez vos fichiers ici ou cliquez pour les sélectionner (les données restent sur votre machine).
+        </label>
+        <div class="chip">
+          <label>Sauvegarde locale</label>
+          <div class="actions">
+            <button id="save-local" class="primary" type="button">Sauvegarder les données</button>
+            <button id="clear-local" type="button">Effacer la sauvegarde</button>
+          </div>
+          <p id="save-status" class="muted" style="margin-top:0.5rem">Aucune sauvegarde locale pour le moment.</p>
+        </div>
+      </div>
+      <p id="file-summary" class="muted" style="margin-top:0.5rem">Aucun fichier chargé.</p>
+    </section>
+
+    <section>
+      <h2>2) Filtres</h2>
+      <div class="controls">
+        <div class="chip">
+          <label for="direction-select">Direction</label>
+          <select id="direction-select" multiple size="4"></select>
+        </div>
+        <div class="chip">
+          <label for="status-select">Statut</label>
+          <select id="status-select" multiple size="4"></select>
+        </div>
+        <div class="chip">
+          <label for="agent-input">Agent (nom ou extension)</label>
+          <input id="agent-input" type="text" placeholder="Ex : Dupont ou 123" />
+        </div>
+        <div class="chip">
+          <label>Période</label>
+          <div class="controls" style="padding:0; gap:0.35rem; flex-wrap:nowrap;">
+            <input id="start-date" type="date" />
+            <input id="end-date" type="date" />
+          </div>
+        </div>
+        <div class="chip" style="align-self:flex-end">
+          <button id="apply-filters" class="primary" type="button">Appliquer les filtres</button>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>3) Indicateurs clés</h2>
+      <div class="kpi-grid" id="kpi-container"></div>
+    </section>
+
+    <section>
+      <h2>4) Statistiques</h2>
+      <div class="grid">
+        <div>
+          <h3>Par agent</h3>
+          <div id="agent-stats"></div>
+        </div>
+        <div>
+          <h3>Répartition temporelle</h3>
+          <div class="chart-wrapper"><canvas id="date-chart"></canvas></div>
+          <div class="chart-wrapper" style="margin-top:1rem"><canvas id="hour-chart"></canvas></div>
+          <div class="chart-wrapper" style="margin-top:1rem"><canvas id="dow-chart"></canvas></div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>5) Données</h2>
+      <div class="actions" style="margin-bottom:0.5rem">
+        <button id="export-btn" type="button">Exporter la sélection (CSV)</button>
+      </div>
+      <div id="data-table"></div>
+    </section>
+  </main>
+
+  <script>
+    const fileInput = document.getElementById('file-input');
+    const fileSummary = document.getElementById('file-summary');
+    const directionSelect = document.getElementById('direction-select');
+    const statusSelect = document.getElementById('status-select');
+    const agentInput = document.getElementById('agent-input');
+    const startDateInput = document.getElementById('start-date');
+    const endDateInput = document.getElementById('end-date');
+    const kpiContainer = document.getElementById('kpi-container');
+    const agentStats = document.getElementById('agent-stats');
+    const dataTable = document.getElementById('data-table');
+    const saveStatus = document.getElementById('save-status');
+
+    let rawData = [];
+    let filteredData = [];
+    let charts = {};
+
+    fileInput.addEventListener('change', (event) => handleFiles(event.target.files));
+    document.getElementById('apply-filters').addEventListener('click', applyFilters);
+    document.getElementById('export-btn').addEventListener('click', exportFiltered);
+    document.getElementById('save-local').addEventListener('click', saveToLocalStorage);
+    document.getElementById('clear-local').addEventListener('click', clearLocalStorage);
+
+    document.querySelector('.dropzone').addEventListener('click', () => fileInput.click());
+
+    function handleFiles(files) {
+      if (!files || !files.length) return;
+      const parsePromises = Array.from(files).map(
+        (file) =>
+          new Promise((resolve, reject) => {
+            Papa.parse(file, {
+              header: true,
+              skipEmptyLines: true,
+              complete: (results) => resolve(results.data),
+              error: reject,
+            });
+          }),
+      );
+
+      Promise.all(parsePromises)
+        .then((dataArrays) => {
+          const merged = dataArrays.flat();
+          rawData = buildDataset(merged);
+          fileSummary.textContent = `${files.length} fichier(s) chargé(s) – ${rawData.length} lignes après nettoyage.`;
+          populateFilters(rawData);
+          applyFilters();
+        })
+        .catch((err) => {
+          console.error(err);
+          fileSummary.textContent = "Erreur lors du chargement des fichiers.";
+        });
+    }
+
+    function normalizeRecord(record) {
+      const normalized = {};
+      Object.entries(record).forEach(([key, value]) => {
+        const cleanKey = String(key).trim();
+        normalized[cleanKey] = typeof value === 'string' ? value.trim() : value;
+      });
+      return normalized;
+    }
+
+    function convertDuration(value) {
+      if (value === null || value === undefined || value === '') return 0;
+      if (typeof value === 'number') return value;
+      const text = String(value).trim();
+      const match = text.match(/^(\d+):(\d{1,2}):(\d{1,2})(?:\.\d+)?$/);
+      if (match) {
+        const [_, h, m, s] = match;
+        return Number(h) * 3600 + Number(m) * 60 + Number(s);
+      }
+      const numeric = Number(text.replace(',', '.'));
+      return Number.isFinite(numeric) ? numeric : 0;
+    }
+
+    function extractAgent(from, to) {
+      const regex = /([^()]+?)\s*\((\d{2,})\)/;
+      const candidates = [from, to];
+      for (const candidate of candidates) {
+        const match = regex.exec(candidate || '');
+        if (match) {
+          return { name: match[1].trim(), ext: match[2] };
+        }
+      }
+      return { name: '', ext: '' };
+    }
+
+    function categorizeCall(direction, to, details) {
+      const dir = (direction || '').trim().toLowerCase();
+      const toText = (to || '').toLowerCase();
+      const detailText = (details || '').toLowerCase();
+      if (toText.includes('voicemail') || detailText.includes('voicemail')) return 'Voicemail';
+      if (toText.includes('script') || detailText.includes('call script')) return 'Script';
+      if (['inbound', 'outbound', 'internal'].includes(dir)) return dir.charAt(0).toUpperCase() + dir.slice(1);
+      return 'Autre';
+    }
+
+    function isoWeek(date) {
+      const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+      const dayNum = d.getUTCDay() || 7;
+      d.setUTCDate(d.getUTCDate() + 4 - dayNum);
+      const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+      return Math.ceil(((d - yearStart) / 86400000 + 1) / 7);
+    }
+
+    function buildDataset(rows) {
+      const unique = new Map();
+      rows.forEach((row) => {
+        const r = normalizeRecord(row);
+        const callTime = r['Call Time'] ? new Date(r['Call Time']) : null;
+        const agent = extractAgent(r['From'], r['To']);
+        const record = {
+          ...r,
+          AgentName: agent.name,
+          AgentExt: agent.ext,
+          RingingSeconds: convertDuration(r['Ringing']),
+          TalkingSeconds: convertDuration(r['Talking']),
+          DirectionClean: (r['Direction'] || '').toString().trim(),
+          StatusClean: (r['Status'] || '').toString().trim(),
+          CallTime: callTime,
+          Date: callTime ? callTime.toISOString().slice(0, 10) : '',
+          Year: callTime ? callTime.getFullYear() : '',
+          Month: callTime ? callTime.getMonth() + 1 : '',
+          Week: callTime ? isoWeek(callTime) : '',
+          DayOfWeek: callTime ? callTime.toLocaleDateString('fr-FR', { weekday: 'long' }) : '',
+          Hour: callTime ? callTime.getHours() : '',
+        };
+        record.CallType = categorizeCall(record.DirectionClean, record.To, record['Call Activity Details']);
+        const key = record['Call ID'] || `${record.CallTime}-${record.From}-${record.To}-${record.StatusClean}`;
+        unique.set(key, record);
+      });
+      return Array.from(unique.values());
+    }
+
+    function populateFilters(data) {
+      const directions = Array.from(new Set(data.map((d) => d.DirectionClean).filter(Boolean))).sort();
+      const statuses = Array.from(new Set(data.map((d) => d.StatusClean).filter(Boolean))).sort();
+      directionSelect.innerHTML = directions.map((dir) => `<option value="${dir}">${dir}</option>`).join('');
+      statusSelect.innerHTML = statuses.map((st) => `<option value="${st}">${st}</option>`).join('');
+      saveStatus.textContent = 'Données chargées en mémoire vive uniquement.';
+    }
+
+    function applyFilters() {
+      if (!rawData.length) return;
+      const selectedDirections = Array.from(directionSelect.selectedOptions).map((o) => o.value.toLowerCase());
+      const selectedStatuses = Array.from(statusSelect.selectedOptions).map((o) => o.value.toLowerCase());
+      const agentQuery = agentInput.value.trim().toLowerCase();
+      const startDate = startDateInput.value ? new Date(startDateInput.value) : null;
+      const endDate = endDateInput.value ? new Date(endDateInput.value) : null;
+
+      filteredData = rawData.filter((row) => {
+        const dir = (row.DirectionClean || '').toLowerCase();
+        const status = (row.StatusClean || '').toLowerCase();
+        const agentMatch = !agentQuery ||
+          (row.AgentName && row.AgentName.toLowerCase().includes(agentQuery)) ||
+          (row.AgentExt && row.AgentExt.toLowerCase().includes(agentQuery));
+
+        const date = row.CallTime ? new Date(row.CallTime) : null;
+        const dateOk = (!startDate || (date && date >= startDate)) && (!endDate || (date && date <= endDate));
+
+        const dirOk = !selectedDirections.length || selectedDirections.includes(dir);
+        const statusOk = !selectedStatuses.length || selectedStatuses.includes(status);
+        return agentMatch && dateOk && dirOk && statusOk;
+      });
+
+      renderKPIs();
+      renderAgentTable();
+      renderDataTable();
+      renderCharts();
+    }
+
+    function renderKPIs() {
+      const total = filteredData.length;
+      const answered = filteredData.filter((r) => (r.StatusClean || '').toLowerCase() === 'answered').length;
+      const missed = filteredData.filter((r) => ['no answer', 'missed'].includes((r.StatusClean || '').toLowerCase())).length;
+      const totalTalk = filteredData.reduce((sum, r) => sum + (Number(r.TalkingSeconds) || 0), 0);
+      const avgTalk = filteredData.length ? totalTalk / filteredData.length : 0;
+
+      const kpis = [
+        { label: 'Appels totaux', value: total },
+        { label: 'Répondus', value: answered },
+        { label: 'Manqués', value: missed },
+        { label: 'Durée moyenne de conversation (s)', value: avgTalk.toFixed(1) },
+      ];
+
+      kpiContainer.innerHTML = kpis
+        .map(
+          (kpi) => `
+            <div class="kpi">
+              <div class="label">${kpi.label}</div>
+              <div class="value">${kpi.value}</div>
+            </div>`,
+        )
+        .join('');
+    }
+
+    function renderAgentTable() {
+      const grouped = {};
+      filteredData.forEach((row) => {
+        const key = row.AgentName || row.AgentExt || 'Inconnu';
+        if (!grouped[key]) {
+          grouped[key] = {
+            Agent: key,
+            Appels: 0,
+            Répondus: 0,
+            Manqués: 0,
+            TempsParole: 0,
+          };
+        }
+        grouped[key].Appels += 1;
+        const status = (row.StatusClean || '').toLowerCase();
+        if (status === 'answered') grouped[key].Répondus += 1;
+        if (['no answer', 'missed'].includes(status)) grouped[key].Manqués += 1;
+        grouped[key].TempsParole += Number(row.TalkingSeconds) || 0;
+      });
+
+      const rows = Object.values(grouped).sort((a, b) => b.Appels - a.Appels);
+      if (!rows.length) {
+        agentStats.innerHTML = '<p class="muted">Aucune donnée à afficher.</p>';
+        return;
+      }
+      const html = `
+        <table>
+          <thead>
+            <tr>
+              <th>Agent</th>
+              <th>Appels</th>
+              <th>Répondus</th>
+              <th>Manqués</th>
+              <th>Temps de parole moyen (s)</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows
+              .map(
+                (r) => `
+                  <tr>
+                    <td>${r.Agent}</td>
+                    <td>${r.Appels}</td>
+                    <td><span class="badge success">${r.Répondus}</span></td>
+                    <td><span class="badge warn">${r.Manqués}</span></td>
+                    <td>${(r.TempsParole / r.Appels || 0).toFixed(1)}</td>
+                  </tr>`,
+              )
+              .join('')}
+          </tbody>
+        </table>`;
+      agentStats.innerHTML = html;
+    }
+
+    function renderDataTable() {
+      if (!filteredData.length) {
+        dataTable.innerHTML = '<p class="muted">Aucune donnée à afficher.</p>';
+        return;
+      }
+      const headers = ['Call Time', 'From', 'To', 'Direction', 'Status', 'AgentName', 'AgentExt', 'CallType', 'TalkingSeconds', 'RingingSeconds'];
+      const html = `
+        <table>
+          <thead>
+            <tr>${headers.map((h) => `<th>${h}</th>`).join('')}</tr>
+          </thead>
+          <tbody>
+            ${filteredData
+              .slice(0, 400)
+              .map(
+                (row) => `
+                  <tr>
+                    ${headers
+                      .map((h) => `<td>${row[h] ?? row[`${h}Clean`] ?? ''}</td>`)
+                      .join('')}
+                  </tr>`,
+              )
+              .join('')}
+          </tbody>
+        </table>
+        <p class="muted">${filteredData.length > 400 ? 'Affichage limité aux 400 premières lignes pour garder de bonnes performances.' : ''}</p>`;
+      dataTable.innerHTML = html;
+    }
+
+    function renderCharts() {
+      const byDate = {};
+      const byHour = Array(24).fill(0);
+      const dowOrder = ['lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi', 'dimanche'];
+      const byDow = Object.fromEntries(dowOrder.map((d) => [d, 0]));
+
+      filteredData.forEach((row) => {
+        if (row.Date) byDate[row.Date] = (byDate[row.Date] || 0) + 1;
+        if (row.Hour !== '') byHour[Number(row.Hour)] += 1;
+        const dow = (row.DayOfWeek || '').toLowerCase();
+        if (dow in byDow) byDow[dow] += 1;
+      });
+
+      createChart('date-chart', 'line', {
+        labels: Object.keys(byDate),
+        datasets: [{ label: 'Appels', data: Object.values(byDate), borderColor: '#22c55e', tension: 0.2 }],
+      });
+
+      createChart('hour-chart', 'bar', {
+        labels: Array.from({ length: 24 }, (_, i) => `${i}h`),
+        datasets: [{ label: 'Appels', data: byHour, backgroundColor: '#22c55e' }],
+      });
+
+      createChart('dow-chart', 'bar', {
+        labels: dowOrder.map((d) => d.charAt(0).toUpperCase() + d.slice(1)),
+        datasets: [{ label: 'Appels', data: dowOrder.map((d) => byDow[d]), backgroundColor: '#22c55e' }],
+      });
+    }
+
+    function createChart(id, type, data) {
+      const ctx = document.getElementById(id);
+      if (charts[id]) charts[id].destroy();
+      charts[id] = new Chart(ctx, {
+        type,
+        data,
+        options: { responsive: true, plugins: { legend: { display: false } } },
+      });
+    }
+
+    function exportFiltered() {
+      if (!filteredData.length) return alert('Aucune donnée filtrée à exporter.');
+      const headers = Object.keys(filteredData[0]);
+      const csv = [headers.join(',')].concat(
+        filteredData.map((row) => headers.map((h) => JSON.stringify(row[h] ?? '')).join(',')),
+      );
+      const blob = new Blob([csv.join('\n')], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'appels_filtrés.csv';
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+
+    function saveToLocalStorage() {
+      if (!rawData.length) return alert('Chargez des fichiers avant de sauvegarder.');
+      localStorage.setItem('appels3cx:data', JSON.stringify(rawData));
+      saveStatus.textContent = 'Sauvegarde locale réalisée. Les données seront rechargées automatiquement au prochain lancement.';
+    }
+
+    function clearLocalStorage() {
+      localStorage.removeItem('appels3cx:data');
+      saveStatus.textContent = 'Sauvegarde locale effacée.';
+    }
+
+    function restoreFromLocalStorage() {
+      const saved = localStorage.getItem('appels3cx:data');
+      if (!saved) return;
+      try {
+        rawData = JSON.parse(saved);
+        fileSummary.textContent = `Données restaurées depuis la sauvegarde locale – ${rawData.length} lignes.`;
+        populateFilters(rawData);
+        applyFilters();
+        saveStatus.textContent = 'Données chargées depuis la sauvegarde locale.';
+      } catch (e) {
+        console.error('Impossible de lire la sauvegarde locale', e);
+      }
+    }
+
+    restoreFromLocalStorage();
+  </script>
+</body>
+</html>
