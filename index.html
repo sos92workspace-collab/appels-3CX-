@@ -609,8 +609,10 @@
           (row.AgentName && row.AgentName.toLowerCase().includes(agentQuery)) ||
           (row.AgentExt && row.AgentExt.toLowerCase().includes(agentQuery));
 
-        const date = row.CallTime ? new Date(row.CallTime) : null;
-        const dateOk = !date || ((!startDate || date >= startDate) && (!endDate || date <= endDate));
+        const dateSource = row.CallTime ?? row.Date ?? null;
+        const dateObj = dateSource ? new Date(dateSource) : null;
+        const validDate = dateObj instanceof Date && !Number.isNaN(dateObj);
+        const dateOk = !validDate || ((!startDate || dateObj >= startDate) && (!endDate || dateObj <= endDate));
 
         const dirOk = !selectedDirections.length || selectedDirections.includes(dir);
         const statusOk = !selectedStatuses.length || selectedStatuses.includes(status);
