@@ -8,7 +8,7 @@ et statut. Tout tient dans ce fichier unique pour un lancement simple via
 
 import io
 import re
-from typing import Iterable, List
+from typing import Iterable, List, Optional
 
 import altair as alt
 import pandas as pd
@@ -28,36 +28,35 @@ def read_csv_file(uploaded_file: st.runtime.uploaded_file_manager.UploadedFile) 
     l'utilisateur.
     """
 
-    def _try_read(*, sep, encoding):
-        uploaded_file.seek(0)
-        return pd.read_csv(uploaded_file, sep=sep, engine="python", encoding=encoding)
-
-    # Tente automatiquement de détecter le séparateur puis bascule sur les
-    # séparateurs les plus fréquents. Deux encodages sont essayés pour éviter
-    # les erreurs liées aux accents.
+    # Options de lecture testées en cascade :
+    # - utf-8-sig pour retirer un éventuel BOM
+    # - détection automatique du séparateur ou forcé en "," / ";"
     attempts = [
-        {"sep": None, "encoding": "utf-8"},
-        {"sep": ";", "encoding": "utf-8"},
-        {"sep": ",", "encoding": "utf-8"},
-        {"sep": None, "encoding": "latin-1"},
-        {"sep": ";", "encoding": "latin-1"},
-        {"sep": ",", "encoding": "latin-1"},
+        {"encoding": "utf-8-sig", "sep": None},
+        {"encoding": "utf-8", "sep": None},
+        {"encoding": "utf-8-sig", "sep": ","},
+        {"encoding": "utf-8-sig", "sep": ";"},
+        {"encoding": "utf-8", "sep": ","},
+        {"encoding": "utf-8", "sep": ";"},
+        {"encoding": "latin-1", "sep": ";"},
     ]
+
+    last_error: Optional[Exception] = None
 
     for params in attempts:
         try:
-            return _try_read(**params)
-        except UnicodeDecodeError:
-            # Passe à l'encodage suivant
-            continue
-        except pd.errors.ParserError:
-            # Essaye une autre combinaison séparateur/encodage
+            uploaded_file.seek(0)
+            return pd.read_csv(uploaded_file, engine="python", **params)
+        except Exception as err:  # pragma: no cover - affichage utilisateur
+            last_error = err
             continue
 
     st.error(
-        "Impossible de lire le fichier CSV. Vérifiez le séparateur (`,` ou `;`) "
-        "et réessayez."
+        "Impossible de lire le fichier CSV (séparateur `,` ou `;`). "
+        "Vérifiez le format et réessayez."
     )
+    if last_error:
+        st.error(f"Détail technique : {last_error}")
     return pd.DataFrame()
 
 
@@ -70,26 +69,29 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def convert_duration_to_seconds(series: pd.Series) -> pd.Series:
-    """Convertit une série de durées au format HH:MM:SS en secondes."""
+    """Convertit une série de durées (HH:MM:SS, MM:SS ou nombre) en secondes."""
 
     def _to_seconds(value):
         if pd.isna(value):
-            return 0
+            return 0.0
         if isinstance(value, (int, float)):
             return float(value)
 
         text = str(value).strip()
+        if not text:
+            return 0.0
+
         match = re.match(r"^(?:(\d+):)?(\d{1,2}):(\d{1,2})(?:\.\d+)?$", text)
         if match:
             hours = int(match.group(1) or 0)
             minutes = int(match.group(2))
             seconds = int(match.group(3))
-            return hours * 3600 + minutes * 60 + seconds
+            return float(hours * 3600 + minutes * 60 + seconds)
 
         try:
-            return float(text)
+            return float(text.replace(",", "."))
         except ValueError:
-            return 0
+            return 0.0
 
     return series.apply(_to_seconds)
 
@@ -182,7 +184,9 @@ def load_and_prepare_data(files) -> pd.DataFrame:
         return pd.DataFrame()
 
     combined = pd.concat(frames, ignore_index=True)
-    if "Call ID" in combined.columns:
+    if {"Call ID", "Call Time"}.issubset(combined.columns):
+        combined = combined.drop_duplicates(subset=["Call ID", "Call Time"], keep="first")
+    elif "Call ID" in combined.columns:
         combined = combined.drop_duplicates(subset=["Call ID"], keep="first")
     return combined
 
