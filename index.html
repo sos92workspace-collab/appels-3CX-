@@ -400,6 +400,16 @@
       const text = String(value).trim();
       const direct = Date.parse(text);
       if (!Number.isNaN(direct)) return new Date(direct);
+
+      const ampmMatch = text.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)$/i);
+      if (ampmMatch) {
+        const [, d, m, y, hh, mm, ss = '0', suffix] = ampmMatch;
+        const year = y.length === 2 ? 2000 + Number(y) : Number(y);
+        let hours = Number(hh) % 12;
+        if (suffix.toUpperCase() === 'PM') hours += 12;
+        return new Date(year, Number(m) - 1, Number(d), hours, Number(mm), Number(ss));
+      }
+
       const match = text.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
       if (match) {
         const [, d, m, y, hh = '0', mm = '0', ss = '0'] = match;
@@ -498,7 +508,7 @@
           (row.AgentExt && row.AgentExt.toLowerCase().includes(agentQuery));
 
         const date = row.CallTime ? new Date(row.CallTime) : null;
-        const dateOk = (!startDate || (date && date >= startDate)) && (!endDate || (date && date <= endDate));
+        const dateOk = !date || ((!startDate || date >= startDate) && (!endDate || date <= endDate));
 
         const dirOk = !selectedDirections.length || selectedDirections.includes(dir);
         const statusOk = !selectedStatuses.length || selectedStatuses.includes(status);
