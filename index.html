@@ -70,6 +70,16 @@
       transition: transform 0.1s ease;
     }
     button.primary:active { transform: translateY(1px); }
+    textarea {
+      width: 100%;
+      min-height: 110px;
+      padding: 0.65rem 0.75rem;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: #0b1221;
+      color: var(--text);
+      resize: vertical;
+    }
     .dropzone {
       border: 1.5px dashed var(--border);
       border-radius: 12px;
@@ -114,6 +124,11 @@
             <input id="file-input" type="file" accept=".csv,.xls,.xlsx" multiple style="display:none" />
             Glissez-déposez vos fichiers CSV ou Excel ici ou cliquez pour les sélectionner (les données restent sur votre machine).
         </label>
+        <div class="chip">
+          <label for="paste-input">Coller des données CSV / Excel</label>
+          <textarea id="paste-input" placeholder="Collez ici les lignes copiées depuis un tableur ou un fichier CSV (les données restent sur votre machine)."></textarea>
+          <button id="paste-btn" class="primary" type="button" style="margin-top:0.5rem">Charger depuis le collage</button>
+        </div>
         <div class="chip">
           <label>Sauvegarde locale</label>
           <div class="actions">
@@ -196,6 +211,7 @@
     const agentStats = document.getElementById('agent-stats');
     const dataTable = document.getElementById('data-table');
     const saveStatus = document.getElementById('save-status');
+    const pasteInput = document.getElementById('paste-input');
 
     let rawData = [];
     let filteredData = [];
@@ -206,6 +222,7 @@
     document.getElementById('export-btn').addEventListener('click', exportFiltered);
     document.getElementById('save-local').addEventListener('click', saveToLocalStorage);
     document.getElementById('clear-local').addEventListener('click', clearLocalStorage);
+    document.getElementById('paste-btn').addEventListener('click', handlePasteData);
 
     const dropzone = document.querySelector('.dropzone');
     dropzone.addEventListener('click', () => fileInput.click());
@@ -227,15 +244,38 @@
       Promise.all(parsePromises)
         .then((dataArrays) => {
           const merged = dataArrays.flat();
-          rawData = buildDataset(merged);
-          fileSummary.textContent = `${files.length} fichier(s) chargé(s) – ${rawData.length} lignes après nettoyage.`;
-          populateFilters(rawData);
-          applyFilters();
+          ingestRows(merged, `${files.length} fichier(s) chargé(s)`);
         })
         .catch((err) => {
           console.error(err);
           fileSummary.textContent = "Erreur lors du chargement des fichiers.";
         });
+    }
+
+    function ingestRows(rows, summaryLabel) {
+      if (!rows || !rows.length) return;
+      const merged = rawData.concat(rows);
+      rawData = buildDataset(merged);
+      fileSummary.textContent = `${summaryLabel} – ${rawData.length} lignes après nettoyage.`;
+      populateFilters(rawData);
+      applyFilters();
+    }
+
+    function handlePasteData() {
+      const text = pasteInput.value.trim();
+      if (!text) return alert('Collez d\'abord des données copiées depuis votre fichier.');
+
+      const parsed = Papa.parse(text, { header: true, skipEmptyLines: true, dynamicTyping: false });
+      if (parsed.errors && parsed.errors.length) {
+        console.warn('Erreurs lors du collage :', parsed.errors);
+      }
+
+      if (!parsed.data || !parsed.data.length) {
+        return alert('Aucune ligne détectée dans les données collées.');
+      }
+
+      ingestRows(parsed.data, 'Données collées');
+      pasteInput.value = '';
     }
 
     function parseFile(file) {
