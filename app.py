@@ -1,11 +1,18 @@
+"""Application Streamlit pour l'analyse des appels 3CX du standard SOS92.
+
+L'application permet d'importer un ou plusieurs CSV 3CX, de les fusionner,
+nettoyer et enrichir pour faciliter l'analyse par agent, période, direction
+et statut. Tout tient dans ce fichier unique pour un lancement simple via
+``streamlit run app.py``.
+"""
+
 import io
 import re
+from typing import Iterable, List
+
+import altair as alt
 import pandas as pd
 import streamlit as st
-import altair as alt
-
-# Application Streamlit pour l'analyse des appels 3CX du standard SOS92
-# Tout le code est regroupé dans ce fichier pour un déploiement simple via "streamlit run app.py".
 
 
 # -------------------------
@@ -15,40 +22,46 @@ import altair as alt
 def read_csv_file(uploaded_file: st.runtime.uploaded_file_manager.UploadedFile) -> pd.DataFrame:
     """Lit un fichier CSV 3CX téléversé et retourne un DataFrame pandas.
 
-    La fonction est tolérante au séparateur (`,` par défaut) et aux colonnes supplémentaires.
+    La fonction est tolérante au séparateur (`,` par défaut) et aux colonnes
+    supplémentaires. En cas d'erreur d'encodage, un second essai est fait en
+    latin-1 pour éviter de bloquer l'utilisateur.
     """
+
     try:
         return pd.read_csv(uploaded_file)
     except UnicodeDecodeError:
-        # Certains exports peuvent être encodés en ISO-8859-1
         uploaded_file.seek(0)
         return pd.read_csv(uploaded_file, encoding="latin-1")
 
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Normalise le nom des colonnes attendues en supprimant les espaces superflus."""
+    """Normalise les noms de colonnes en supprimant les espaces superflus."""
+
     df = df.copy()
-    df.columns = [col.strip() for col in df.columns]
+    df.columns = [str(col).strip() for col in df.columns]
     return df
 
 
 def convert_duration_to_seconds(series: pd.Series) -> pd.Series:
     """Convertit une série de durées au format HH:MM:SS en secondes."""
+
     def _to_seconds(value):
         if pd.isna(value):
             return 0
         if isinstance(value, (int, float)):
-            return value
-        try:
-            parts = str(value).split(":")
-            if len(parts) == 3:
-                hours, minutes, seconds = parts
-                return int(hours) * 3600 + int(minutes) * 60 + int(float(seconds))
-            if len(parts) == 2:
-                minutes, seconds = parts
-                return int(minutes) * 60 + int(float(seconds))
             return float(value)
-        except Exception:
+
+        text = str(value).strip()
+        match = re.match(r"^(?:(\d+):)?(\d{1,2}):(\d{1,2})(?:\.\d+)?$", text)
+        if match:
+            hours = int(match.group(1) or 0)
+            minutes = int(match.group(2))
+            seconds = int(match.group(3))
+            return hours * 3600 + minutes * 60 + seconds
+
+        try:
+            return float(text)
+        except ValueError:
             return 0
 
     return series.apply(_to_seconds)
@@ -56,8 +69,9 @@ def convert_duration_to_seconds(series: pd.Series) -> pd.Series:
 
 def extract_agent_info(df: pd.DataFrame) -> pd.DataFrame:
     """Extrait le nom et l'extension d'agent depuis les colonnes From/To."""
+
     df = df.copy()
-    pattern = re.compile(r"(?P<name>.+?)\s*\((?P<ext>\d+)\)")
+    pattern = re.compile(r"(?P<name>[^()]+?)\s*\((?P<ext>\d{2,})\)")
 
     def _extract(row):
         for field in ["From", "To"]:
@@ -77,6 +91,7 @@ def extract_agent_info(df: pd.DataFrame) -> pd.DataFrame:
 
 def add_derived_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Ajoute les colonnes dérivées nécessaires à l'analyse."""
+
     df = df.copy()
     # Conversion du Call Time en datetime
     df["Call Time"] = pd.to_datetime(df["Call Time"], errors="coerce")
@@ -110,17 +125,28 @@ def add_derived_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def validate_required_columns(df: pd.DataFrame, filename: str) -> List[str]:
+    """Vérifie la présence des colonnes indispensables et retourne la liste manquante."""
+
+    required_cols = ["Call Time", "Call ID", "From", "To", "Direction", "Status"]
+    missing = [c for c in required_cols if c not in df.columns]
+    if missing:
+        st.error(f"Colonnes manquantes dans {filename}: {', '.join(missing)}")
+    return missing
+
+
 def load_and_prepare_data(files) -> pd.DataFrame:
     """Charge plusieurs CSV, les concatène, supprime les doublons et enrichit les données."""
-    frames = []
+
+    frames: List[pd.DataFrame] = []
+
     for file in files:
         df = read_csv_file(file)
         df = normalize_columns(df)
-        required_cols = ["Call Time", "Call ID", "From", "To", "Direction", "Status"]
-        missing = [c for c in required_cols if c not in df.columns]
-        if missing:
-            st.error(f"Colonnes manquantes dans {file.name}: {', '.join(missing)}")
+
+        if validate_required_columns(df, file.name):
             continue
+
         df = extract_agent_info(df)
         df = add_derived_columns(df)
         frames.append(df)
@@ -136,20 +162,24 @@ def load_and_prepare_data(files) -> pd.DataFrame:
 
 def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
     """Applique les filtres utilisateurs sur le DataFrame."""
+
     if df.empty:
         return df
 
     st.sidebar.header("Filtres")
 
     # Période
-    min_date, max_date = df["Date"].min(), df["Date"].max()
-    start_date, end_date = st.sidebar.date_input(
-        "Plage de dates",
-        value=(min_date, max_date),
-        min_value=min_date,
-        max_value=max_date,
-    )
-    mask = (df["Date"] >= start_date) & (df["Date"] <= end_date)
+    if df["Date"].notna().any():
+        min_date, max_date = df["Date"].min(), df["Date"].max()
+        start_date, end_date = st.sidebar.date_input(
+            "Plage de dates",
+            value=(min_date, max_date),
+            min_value=min_date,
+            max_value=max_date,
+        )
+        mask = (df["Date"] >= start_date) & (df["Date"] <= end_date)
+    else:
+        mask = pd.Series([True] * len(df))
 
     # Agents / extensions
     agent_names = st.sidebar.multiselect("Agents", sorted(df["AgentName"].dropna().unique()))
@@ -187,7 +217,10 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
     min_dur = float(df["CallDurationSeconds"].min() or 0)
     max_dur = float(df["CallDurationSeconds"].max() or 0)
     duration_range = st.sidebar.slider(
-        "Durée d'appel (secondes)", min_value=0.0, max_value=max(max_dur, 0.0), value=(min_dur, max_dur)
+        "Durée d'appel (secondes)",
+        min_value=0.0,
+        max_value=max(max_dur, 0.0),
+        value=(min_dur, max_dur),
     )
     mask &= df["CallDurationSeconds"].between(duration_range[0], duration_range[1])
 
@@ -196,10 +229,12 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
 
 def compute_kpis(df: pd.DataFrame):
     """Calcule les indicateurs clés pour le jeu de données filtré."""
+
     total_calls = len(df)
     answered_calls = (df["Status"].str.lower() == "answered").sum()
     missed_calls = df["Status"].str.lower().isin(["no answer", "missed"]).sum()
     total_talking = df["TalkingSeconds"].sum()
+    total_ringing = df["RingingSeconds"].sum()
     avg_talking = df["TalkingSeconds"].mean() if total_calls else 0
     avg_ringing = df["RingingSeconds"].mean() if total_calls else 0
     distinct_agents = df["AgentExt"].nunique(dropna=True)
@@ -209,15 +244,19 @@ def compute_kpis(df: pd.DataFrame):
     cols[1].metric("Appels répondus", f"{answered_calls}")
     cols[2].metric("Appels manqués", f"{missed_calls}")
     cols[3].metric("Durée totale (talking)", f"{int(total_talking)} s")
-    cols[4].metric("Durée moyenne (talking)", f"{avg_talking:.1f} s")
+    cols[4].metric("Durée totale (ringing)", f"{int(total_ringing)} s")
     cols[5].metric("Durée moyenne (ringing)", f"{avg_ringing:.1f} s")
-    st.caption(f"Agents distincts: {distinct_agents}")
+    st.caption(
+        f"Durée moyenne de conversation: {avg_talking:.1f} s · Agents distincts: {distinct_agents}"
+    )
 
 
 def stats_by_agent(df: pd.DataFrame) -> pd.DataFrame:
     """Retourne un tableau de statistiques agrégées par agent."""
+
     if df.empty:
         return df
+
     grouped = df.groupby(["AgentExt", "AgentName"], dropna=False)
     result = grouped.agg(
         TotalCalls=("Call ID", "count"),
@@ -236,6 +275,7 @@ def stats_by_agent(df: pd.DataFrame) -> pd.DataFrame:
 
 def render_time_charts(df: pd.DataFrame):
     """Affiche des graphiques de répartition temporelle."""
+
     if df.empty:
         st.info("Aucune donnée filtrée pour afficher des graphiques.")
         return
@@ -251,12 +291,16 @@ def render_time_charts(df: pd.DataFrame):
         x="Hour:O", y="Count:Q"
     )
 
-    calls_by_dow = df.groupby("DayOfWeek").size().reset_index(name="Count")
+    dow_type = pd.CategoricalDtype(
+        categories=["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
+        ordered=True,
+    )
+    calls_by_dow = df.copy()
+    calls_by_dow["DayOfWeek"] = calls_by_dow["DayOfWeek"].astype(dow_type)
+    calls_by_dow = calls_by_dow.groupby("DayOfWeek").size().reset_index(name="Count")
     chart_dow = alt.Chart(calls_by_dow).mark_bar().encode(
-        x=alt.X("DayOfWeek", sort=list(pd.CategoricalDtype(categories=[
-            "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"
-        ]).categories)),
-        y="Count:Q"
+        x=alt.X("DayOfWeek", sort=list(dow_type.categories)),
+        y="Count:Q",
     )
 
     st.altair_chart(chart_date, use_container_width=True)
@@ -265,17 +309,39 @@ def render_time_charts(df: pd.DataFrame):
 
 
 def export_data(df: pd.DataFrame):
-    """Propose un bouton pour télécharger les données filtrées au format CSV."""
+    """Propose un bouton pour télécharger les données filtrées au format CSV/Excel."""
+
     if df.empty:
         return
+
     csv_buffer = io.StringIO()
     df.to_csv(csv_buffer, index=False)
     st.download_button(
         label="Exporter les données filtrées (CSV)",
         data=csv_buffer.getvalue(),
-        file_name="appels_filtrés.csv",
+        file_name="appels_filtres.csv",
         mime="text/csv",
     )
+
+    excel_buffer = io.BytesIO()
+    df.to_excel(excel_buffer, index=False)
+    st.download_button(
+        label="Exporter les données filtrées (Excel)",
+        data=excel_buffer.getvalue(),
+        file_name="appels_filtres.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+def render_file_summary(files: Iterable, df: pd.DataFrame) -> None:
+    """Affiche un résumé des fichiers chargés et de la période couverte."""
+
+    file_names = ", ".join(f.name for f in files)
+    st.success(f"{len(files)} fichier(s) chargé(s) – {len(df)} lignes après suppression des doublons.")
+    st.caption(f"Fichiers importés : {file_names}")
+
+    if "Call Time" in df.columns and df["Call Time"].notna().any():
+        st.caption(f"Période couverte : {df['Call Time'].min().date()} → {df['Call Time'].max().date()}")
 
 
 # -------------------------
@@ -302,11 +368,7 @@ def main():
         st.warning("Impossible de charger les données. Vérifiez le format des fichiers.")
         return
 
-    st.success(f"{len(uploaded_files)} fichier(s) chargé(s) – {len(data)} lignes après suppression des doublons.")
-    if "Call Time" in data.columns:
-        st.caption(
-            f"Période: {data['Call Time'].min().date()} → {data['Call Time'].max().date()}"
-        )
+    render_file_summary(uploaded_files, data)
 
     filtered = apply_filters(data)
 
