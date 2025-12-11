@@ -253,7 +253,10 @@
     }
 
     function ingestRows(rows, summaryLabel) {
-      if (!rows || !rows.length) return;
+      if (!rows || !rows.length) {
+        fileSummary.textContent = `${summaryLabel} – aucune ligne détectée.`;
+        return;
+      }
       const merged = rawData.concat(rows);
       rawData = buildDataset(merged);
       fileSummary.textContent = `${summaryLabel} – ${rawData.length} lignes après nettoyage.`;
@@ -314,23 +317,44 @@
       });
     }
 
+    function normalizeKey(key) {
+      return String(key || '')
+        .replace(/^\ufeff+/, '')
+        .trim()
+        .normalize('NFKD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase()
+        .replace(/\s+/g, ' ');
+    }
+
     function normalizeRecord(record) {
       const normalized = {};
-      Object.entries(record).forEach(([key, value]) => {
-        const cleanKey = String(key).trim();
-        normalized[cleanKey] = typeof value === 'string' ? value.trim() : value;
+      Object.entries(record || {}).forEach(([key, value]) => {
+        const normalizedKey = normalizeKey(key);
+        normalized[normalizedKey] = typeof value === 'string' ? value.trim() : value;
       });
       return normalized;
+    }
+
+    function readField(record, candidates, fallback = '') {
+      for (const candidate of candidates) {
+        const normalizedKey = normalizeKey(candidate);
+        if (record.hasOwnProperty(normalizedKey)) return record[normalizedKey];
+      }
+      return fallback;
     }
 
     function convertDuration(value) {
       if (value === null || value === undefined || value === '') return 0;
       if (typeof value === 'number') return value;
       const text = String(value).trim();
-      const match = text.match(/^(\d+):(\d{1,2}):(\d{1,2})(?:\.\d+)?$/);
+      const match = text.match(/^(\d+):(\d{1,2})(?::(\d{1,2})(?:\.\d+)?)?$/);
       if (match) {
-        const [_, h, m, s] = match;
-        return Number(h) * 3600 + Number(m) * 60 + Number(s);
+        const [, a, b, c] = match;
+        const hours = c !== undefined ? Number(a) : 0;
+        const minutes = c !== undefined ? Number(b) : Number(a);
+        const seconds = c !== undefined ? Number(c) : Number(b);
+        return hours * 3600 + minutes * 60 + seconds;
       }
       const numeric = Number(text.replace(',', '.'));
       return Number.isFinite(numeric) ? numeric : 0;
@@ -366,20 +390,55 @@
       return Math.ceil(((d - yearStart) / 86400000 + 1) / 7);
     }
 
+    function parseDateTime(value) {
+      if (!value) return null;
+      if (value instanceof Date && !Number.isNaN(value)) return value;
+      if (typeof value === 'number') {
+        const excel = new Date(Math.round((value - 25569) * 86400 * 1000));
+        if (!Number.isNaN(excel)) return excel;
+      }
+      const text = String(value).trim();
+      const direct = Date.parse(text);
+      if (!Number.isNaN(direct)) return new Date(direct);
+      const match = text.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
+      if (match) {
+        const [, d, m, y, hh = '0', mm = '0', ss = '0'] = match;
+        const year = y.length === 2 ? 2000 + Number(y) : Number(y);
+        return new Date(year, Number(m) - 1, Number(d), Number(hh), Number(mm), Number(ss));
+      }
+      return null;
+    }
+
     function buildDataset(rows) {
       const unique = new Map();
       rows.forEach((row) => {
-        const r = normalizeRecord(row);
-        const callTime = r['Call Time'] ? new Date(r['Call Time']) : null;
-        const agent = extractAgent(r['From'], r['To']);
+        const normalized = normalizeRecord(row);
+        const callTimeRaw = readField(normalized, ['Call Time', 'Call Start Time', 'Start Time', 'Date', 'Date/Heure', 'Debut']);
+        const from = readField(normalized, ['From', 'De', 'Origine']);
+        const to = readField(normalized, ['To', 'Vers', 'Destinataire']);
+        const direction = readField(normalized, ['Direction', 'Sens']);
+        const status = readField(normalized, ['Status', 'Statut']);
+        const ringing = readField(normalized, ['Ringing', 'Sonnerie']);
+        const talking = readField(normalized, ['Talking', 'Parole', 'Conversation']);
+        const callId = readField(normalized, ['Call ID', 'ID', 'ID Appel']);
+        const details = readField(normalized, ['Call Activity Details', 'Details']);
+
+        const callTime = parseDateTime(callTimeRaw);
+        const agent = extractAgent(from, to);
         const record = {
-          ...r,
+          'Call ID': callId,
+          'Call Time': callTimeRaw,
+          From: from,
+          To: to,
+          Direction: direction,
+          Status: status,
+          'Call Activity Details': details,
           AgentName: agent.name,
           AgentExt: agent.ext,
-          RingingSeconds: convertDuration(r['Ringing']),
-          TalkingSeconds: convertDuration(r['Talking']),
-          DirectionClean: (r['Direction'] || '').toString().trim(),
-          StatusClean: (r['Status'] || '').toString().trim(),
+          RingingSeconds: convertDuration(ringing),
+          TalkingSeconds: convertDuration(talking),
+          DirectionClean: (direction || '').toString().trim(),
+          StatusClean: (status || '').toString().trim(),
           CallTime: callTime,
           Date: callTime ? callTime.toISOString().slice(0, 10) : '',
           Year: callTime ? callTime.getFullYear() : '',
@@ -400,6 +459,15 @@
       const statuses = Array.from(new Set(data.map((d) => d.StatusClean).filter(Boolean))).sort();
       directionSelect.innerHTML = directions.map((dir) => `<option value="${dir}">${dir}</option>`).join('');
       statusSelect.innerHTML = statuses.map((st) => `<option value="${st}">${st}</option>`).join('');
+
+      const dates = data.map((d) => d.Date).filter(Boolean).sort();
+      if (dates.length) {
+        startDateInput.min = endDateInput.min = dates[0];
+        startDateInput.max = endDateInput.max = dates[dates.length - 1];
+        if (!startDateInput.value) startDateInput.value = dates[0];
+        if (!endDateInput.value) endDateInput.value = dates[dates.length - 1];
+      }
+
       saveStatus.textContent = 'Données chargées en mémoire vive uniquement.';
     }
 
