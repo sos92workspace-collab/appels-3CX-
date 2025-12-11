@@ -8,6 +8,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet" />
   <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <style>
     :root {
@@ -102,16 +103,16 @@
 <body>
   <header>
     <h1>Analyse locale des appels 3CX</h1>
-    <p class="subtitle">Chargez vos CSV, analysez hors-ligne, exportez et sauvegardez vos données directement dans le navigateur.</p>
+    <p class="subtitle">Chargez vos CSV ou fichiers Excel, analysez hors-ligne, exportez et sauvegardez vos données directement dans le navigateur.</p>
   </header>
 
   <main>
     <section>
-      <h2>1) Importer les CSV</h2>
+      <h2>1) Importer les CSV ou XLSX</h2>
       <div class="grid">
         <label class="dropzone">
-          <input id="file-input" type="file" accept=".csv" multiple style="display:none" />
-          Glissez-déposez vos fichiers ici ou cliquez pour les sélectionner (les données restent sur votre machine).
+            <input id="file-input" type="file" accept=".csv,.xls,.xlsx" multiple style="display:none" />
+            Glissez-déposez vos fichiers CSV ou Excel ici ou cliquez pour les sélectionner (les données restent sur votre machine).
         </label>
         <div class="chip">
           <label>Sauvegarde locale</label>
@@ -221,17 +222,7 @@
 
     function handleFiles(files) {
       if (!files || !files.length) return;
-      const parsePromises = Array.from(files).map(
-        (file) =>
-          new Promise((resolve, reject) => {
-            Papa.parse(file, {
-              header: true,
-              skipEmptyLines: true,
-              complete: (results) => resolve(results.data),
-              error: reject,
-            });
-          }),
-      );
+      const parsePromises = Array.from(files).map(parseFile);
 
       Promise.all(parsePromises)
         .then((dataArrays) => {
@@ -245,6 +236,42 @@
           console.error(err);
           fileSummary.textContent = "Erreur lors du chargement des fichiers.";
         });
+    }
+
+    function parseFile(file) {
+      const ext = file.name.split('.').pop().toLowerCase();
+
+      if (['xlsx', 'xls'].includes(ext)) {
+        return new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = (e) => {
+            try {
+              const workbook = XLSX.read(new Uint8Array(e.target.result), {
+                type: 'array',
+                cellDates: true,
+              });
+              const sheetName = workbook.SheetNames[0];
+              if (!sheetName) return resolve([]);
+              const sheet = workbook.Sheets[sheetName];
+              const json = XLSX.utils.sheet_to_json(sheet, { defval: '', raw: false });
+              resolve(json);
+            } catch (error) {
+              reject(error);
+            }
+          };
+          reader.onerror = reject;
+          reader.readAsArrayBuffer(file);
+        });
+      }
+
+      return new Promise((resolve, reject) => {
+        Papa.parse(file, {
+          header: true,
+          skipEmptyLines: true,
+          complete: (results) => resolve(results.data),
+          error: reject,
+        });
+      });
     }
 
     function normalizeRecord(record) {
