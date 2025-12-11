@@ -401,17 +401,25 @@ def main():
 
     render_file_summary(uploaded_files, data)
 
+    st.subheader("Indicateurs clés (global)")
+    compute_kpis(data)
+
+    st.subheader("Statistiques par agent (global)")
+    st.dataframe(stats_by_agent(data))
+
+    render_time_charts(data)
+
     filtered = apply_filters(data)
 
-    st.subheader("Indicateurs clés")
+    st.subheader("Indicateurs clés (données filtrées)")
     compute_kpis(filtered)
 
-    st.subheader("Statistiques par agent")
+    st.subheader("Statistiques par agent (données filtrées)")
     st.dataframe(stats_by_agent(filtered))
 
     render_time_charts(filtered)
 
-    st.subheader("Données détaillées")
+    st.subheader("Données détaillées (après filtres)")
     st.dataframe(filtered.head(500))
 
     export_data(filtered)
