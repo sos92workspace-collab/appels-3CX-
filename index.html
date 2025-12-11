@@ -130,7 +130,7 @@
           <button id="paste-btn" class="primary" type="button" style="margin-top:0.5rem">Charger depuis le collage</button>
         </div>
         <div class="chip">
-          <label>Sauvegarde locale</label>
+          <label>Sauvegarde navigateur (IndexedDB)</label>
           <div class="actions">
             <button id="save-local" class="primary" type="button">Sauvegarder les données</button>
             <button id="clear-local" type="button">Effacer la sauvegarde</button>
@@ -217,11 +217,15 @@
     let filteredData = [];
     let charts = {};
 
+    const DB_NAME = 'appels3cx-db';
+    const DB_VERSION = 1;
+    const DB_STORE = 'calls';
+
     fileInput.addEventListener('change', (event) => handleFiles(event.target.files));
     document.getElementById('apply-filters').addEventListener('click', applyFilters);
     document.getElementById('export-btn').addEventListener('click', exportFiltered);
-    document.getElementById('save-local').addEventListener('click', saveToLocalStorage);
-    document.getElementById('clear-local').addEventListener('click', clearLocalStorage);
+    document.getElementById('save-local').addEventListener('click', manualPersist);
+    document.getElementById('clear-local').addEventListener('click', clearIndexedDB);
     document.getElementById('paste-btn').addEventListener('click', handlePasteData);
 
     const dropzone = document.querySelector('.dropzone');
@@ -237,14 +241,104 @@
       handleFiles(event.dataTransfer.files);
     });
 
+    function openDatabase() {
+      return new Promise((resolve, reject) => {
+        const request = indexedDB.open(DB_NAME, DB_VERSION);
+
+        request.onupgradeneeded = (event) => {
+          const db = event.target.result;
+          if (!db.objectStoreNames.contains(DB_STORE)) {
+            db.createObjectStore(DB_STORE, { keyPath: 'id', autoIncrement: true });
+          }
+        };
+
+        request.onsuccess = (event) => resolve(event.target.result);
+        request.onerror = (event) => reject(event.target.error);
+      });
+    }
+
+    async function persistDataset(rows) {
+      try {
+        const db = await openDatabase();
+        await new Promise((resolve, reject) => {
+          const tx = db.transaction(DB_STORE, 'readwrite');
+          const store = tx.objectStore(DB_STORE);
+          store.clear();
+          rows.forEach((row) => {
+            const { id: _ignored, ...payload } = row;
+            store.add(payload);
+          });
+          tx.oncomplete = resolve;
+          tx.onerror = () => reject(tx.error);
+        });
+        saveStatus.textContent = 'Données sauvegardées dans IndexedDB (stockage disque du navigateur).';
+      } catch (error) {
+        console.error('Impossible de sauvegarder dans IndexedDB', error);
+        saveStatus.textContent = "Échec de la sauvegarde IndexedDB. Les données restent en mémoire vive.";
+      }
+    }
+
+    async function restoreFromIndexedDB() {
+      try {
+        const db = await openDatabase();
+        const rows = await new Promise((resolve, reject) => {
+          const result = [];
+          const tx = db.transaction(DB_STORE, 'readonly');
+          const store = tx.objectStore(DB_STORE);
+          const cursorReq = store.openCursor();
+          cursorReq.onsuccess = (event) => {
+            const cursor = event.target.result;
+            if (cursor) {
+              const { id: _ignored, ...payload } = cursor.value;
+              result.push(payload);
+              cursor.continue();
+            } else {
+              resolve(result);
+            }
+          };
+          cursorReq.onerror = () => reject(cursorReq.error);
+        });
+
+        if (rows.length) {
+          rawData = rows;
+          fileSummary.textContent = `Données restaurées depuis IndexedDB – ${rawData.length} lignes.`;
+          populateFilters(rawData);
+          applyFilters();
+          saveStatus.textContent = 'Données chargées depuis IndexedDB.';
+        }
+      } catch (error) {
+        console.error('Lecture IndexedDB impossible', error);
+      }
+    }
+
+    async function clearIndexedDB() {
+      await new Promise((resolve, reject) => {
+        const req = indexedDB.deleteDatabase(DB_NAME);
+        req.onsuccess = resolve;
+        req.onerror = () => reject(req.error);
+      });
+      rawData = [];
+      filteredData = [];
+      dataTable.innerHTML = '';
+      kpiContainer.innerHTML = '';
+      agentStats.innerHTML = '';
+      fileSummary.textContent = 'Sauvegarde supprimée.';
+      saveStatus.textContent = 'Aucune sauvegarde locale pour le moment.';
+    }
+
+    async function manualPersist() {
+      if (!rawData.length) return alert('Chargez des fichiers avant de sauvegarder.');
+      await persistDataset(rawData);
+    }
+
     function handleFiles(files) {
       if (!files || !files.length) return;
       const parsePromises = Array.from(files).map(parseFile);
 
       Promise.all(parsePromises)
-        .then((dataArrays) => {
+        .then(async (dataArrays) => {
           const merged = dataArrays.flat();
-          ingestRows(merged, `${files.length} fichier(s) chargé(s)`);
+          await ingestRows(merged, `${files.length} fichier(s) chargé(s)`);
         })
         .catch((err) => {
           console.error(err);
@@ -252,7 +346,7 @@
         });
     }
 
-    function ingestRows(rows, summaryLabel) {
+    async function ingestRows(rows, summaryLabel) {
       if (!rows || !rows.length) {
         fileSummary.textContent = `${summaryLabel} – aucune ligne détectée.`;
         return;
@@ -262,15 +356,16 @@
       rawData = cleaned;
       const duplicateNote = duplicates ? ` (${duplicates} doublon(s) ignoré(s) sur ${merged.length} lignes chargées)` : '';
       fileSummary.textContent = `${summaryLabel} – ${rawData.length} lignes après nettoyage${duplicateNote}.`;
+      await persistDataset(rawData);
       populateFilters(rawData);
       applyFilters();
     }
 
-    function handlePasteData() {
+    async function handlePasteData() {
       const text = pasteInput.value.trim();
       if (!text) return alert('Collez d\'abord des données copiées depuis votre fichier.');
 
-      const parsed = Papa.parse(text, { header: true, skipEmptyLines: true, dynamicTyping: false });
+      const parsed = Papa.parse(text, { header: true, skipEmptyLines: 'greedy', dynamicTyping: false });
       if (parsed.errors && parsed.errors.length) {
         console.warn('Erreurs lors du collage :', parsed.errors);
       }
@@ -279,7 +374,7 @@
         return alert('Aucune ligne détectée dans les données collées.');
       }
 
-      ingestRows(parsed.data, 'Données collées');
+      await ingestRows(parsed.data, 'Données collées');
       pasteInput.value = '';
     }
 
@@ -499,7 +594,7 @@
         if (!endDateInput.value) endDateInput.value = dates[dates.length - 1];
       }
 
-      saveStatus.textContent = 'Données chargées en mémoire vive uniquement.';
+      saveStatus.textContent = 'Données chargées ; sauvegarde automatique dans IndexedDB.';
     }
 
     function applyFilters() {
@@ -693,32 +788,7 @@
       URL.revokeObjectURL(url);
     }
 
-    function saveToLocalStorage() {
-      if (!rawData.length) return alert('Chargez des fichiers avant de sauvegarder.');
-      localStorage.setItem('appels3cx:data', JSON.stringify(rawData));
-      saveStatus.textContent = 'Sauvegarde locale réalisée. Les données seront rechargées automatiquement au prochain lancement.';
-    }
-
-    function clearLocalStorage() {
-      localStorage.removeItem('appels3cx:data');
-      saveStatus.textContent = 'Sauvegarde locale effacée.';
-    }
-
-    function restoreFromLocalStorage() {
-      const saved = localStorage.getItem('appels3cx:data');
-      if (!saved) return;
-      try {
-        rawData = JSON.parse(saved);
-        fileSummary.textContent = `Données restaurées depuis la sauvegarde locale – ${rawData.length} lignes.`;
-        populateFilters(rawData);
-        applyFilters();
-        saveStatus.textContent = 'Données chargées depuis la sauvegarde locale.';
-      } catch (e) {
-        console.error('Impossible de lire la sauvegarde locale', e);
-      }
-    }
-
-    restoreFromLocalStorage();
+    restoreFromIndexedDB();
   </script>
 </body>
 </html>
