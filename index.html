@@ -411,7 +411,9 @@
 
     function buildDataset(rows) {
       const unique = new Map();
-      rows.forEach((row) => {
+      let duplicateCounter = 0;
+
+      rows.forEach((row, idx) => {
         const normalized = normalizeRecord(row);
         const callTimeRaw = readField(normalized, ['Call Time', 'Call Start Time', 'Start Time', 'Date', 'Date/Heure', 'Debut']);
         const from = readField(normalized, ['From', 'De', 'Origine']);
@@ -448,7 +450,16 @@
           Hour: callTime ? callTime.getHours() : '',
         };
         record.CallType = categorizeCall(record.DirectionClean, record.To, record['Call Activity Details']);
-        const key = record['Call ID'] || `${record.CallTime}-${record.From}-${record.To}-${record.StatusClean}`;
+        const baseKey = record['Call ID']
+          || (record.CallTime ? `${record.CallTime.toISOString?.() || record.CallTime}` : '')
+          || `${record.From}-${record.To}-${record.StatusClean}-${idx}`;
+
+        let key = baseKey || `row-${idx}`;
+        while (unique.has(key)) {
+          duplicateCounter += 1;
+          key = `${baseKey || 'row'}-dup${duplicateCounter}`;
+        }
+
         unique.set(key, record);
       });
       return Array.from(unique.values());
