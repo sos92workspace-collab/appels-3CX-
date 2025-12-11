@@ -153,14 +153,25 @@
           <select id="status-select" multiple size="4"></select>
         </div>
         <div class="chip">
-          <label for="agent-input">Agent (nom ou extension)</label>
-          <input id="agent-input" type="text" placeholder="Ex : Dupont ou 123" />
+          <label for="agent-select">Utilisateurs (agents / extensions)</label>
+          <select id="agent-select" multiple size="6"></select>
+        </div>
+        <div class="chip">
+          <label for="queue-select">Files d'attente</label>
+          <select id="queue-select" multiple size="6"></select>
         </div>
         <div class="chip">
           <label>Période</label>
           <div class="controls" style="padding:0; gap:0.35rem; flex-wrap:nowrap;">
             <input id="start-date" type="date" />
             <input id="end-date" type="date" />
+          </div>
+        </div>
+        <div class="chip">
+          <label>Horaires (heures)</label>
+          <div class="controls" style="padding:0; gap:0.35rem; flex-wrap:nowrap;">
+            <input id="start-hour" type="number" min="0" max="23" step="1" />
+            <input id="end-hour" type="number" min="0" max="23" step="1" />
           </div>
         </div>
         <div class="chip" style="align-self:flex-end">
@@ -219,9 +230,12 @@
     const fileSummary = document.getElementById('file-summary');
     const directionSelect = document.getElementById('direction-select');
     const statusSelect = document.getElementById('status-select');
-    const agentInput = document.getElementById('agent-input');
+    const agentSelect = document.getElementById('agent-select');
+    const queueSelect = document.getElementById('queue-select');
     const startDateInput = document.getElementById('start-date');
     const endDateInput = document.getElementById('end-date');
+    const startHourInput = document.getElementById('start-hour');
+    const endHourInput = document.getElementById('end-hour');
     const kpiContainer = document.getElementById('kpi-container');
     const agentStats = document.getElementById('agent-stats');
     const dataTable = document.getElementById('data-table');
@@ -719,6 +733,38 @@
       directionSelect.innerHTML = directions.map((dir) => `<option value="${dir}">${dir}</option>`).join('');
       statusSelect.innerHTML = statuses.map((st) => `<option value="${st}">${st}</option>`).join('');
 
+      const agentOptions = Array.from(
+        new Map(
+          data
+            .filter((d) => d.AgentExt || d.AgentLabel)
+            .map((d) => {
+              const value = (d.AgentExt || d.AgentLabel || '').toString();
+              const label = d.AgentLabel || (d.AgentExt ? `Ext ${d.AgentExt}` : value);
+              return [value.toLowerCase(), { value, label }];
+            }),
+        ).values(),
+      ).sort((a, b) => a.label.localeCompare(b.label, 'fr'));
+
+      agentSelect.innerHTML = agentOptions
+        .map((agent) => `<option value="${agent.value}">${agent.label}</option>`)
+        .join('');
+
+      const queueOptions = Array.from(
+        new Map(
+          data
+            .filter((d) => d.QueueLabel || d.QueueNumber)
+            .map((d) => {
+              const value = (d.QueueNumber || d.QueueLabel || '').toString();
+              const label = [d.QueueLabel, d.QueueNumber].filter(Boolean).join(' · ');
+              return [value.toLowerCase(), { value, label: label || value }];
+            }),
+        ).values(),
+      ).sort((a, b) => a.label.localeCompare(b.label, 'fr'));
+
+      queueSelect.innerHTML = queueOptions
+        .map((queue) => `<option value="${queue.value}">${queue.label}</option>`)
+        .join('');
+
       const dates = data.map((d) => d.Date).filter(Boolean).sort();
       if (dates.length) {
         startDateInput.min = endDateInput.min = dates[0];
@@ -727,6 +773,9 @@
         if (!endDateInput.value) endDateInput.value = dates[dates.length - 1];
       }
 
+      if (!startHourInput.value) startHourInput.value = 0;
+      if (!endHourInput.value) endHourInput.value = 23;
+
       saveStatus.textContent = 'Données chargées ; sauvegarde automatique dans IndexedDB.';
     }
 
@@ -734,26 +783,34 @@
       if (!rawData.length) return;
       const selectedDirections = Array.from(directionSelect.selectedOptions).map((o) => o.value.toLowerCase());
       const selectedStatuses = Array.from(statusSelect.selectedOptions).map((o) => o.value.toLowerCase());
-      const agentQuery = agentInput.value.trim().toLowerCase();
+      const selectedAgents = Array.from(agentSelect.selectedOptions).map((o) => o.value.toLowerCase());
+      const selectedQueues = Array.from(queueSelect.selectedOptions).map((o) => o.value.toLowerCase());
       const startDate = startDateInput.value ? new Date(startDateInput.value) : null;
       const endDate = endDateInput.value ? new Date(endDateInput.value) : null;
+      const startHour = startHourInput.value !== '' ? Number(startHourInput.value) : null;
+      const endHour = endHourInput.value !== '' ? Number(endHourInput.value) : null;
 
       filteredData = rawData.filter((row) => {
         const dir = (row.DirectionClean || '').toLowerCase();
         const status = (row.StatusClean || '').toLowerCase();
-        const agentMatch = !agentQuery ||
-          (row.AgentName && row.AgentName.toLowerCase().includes(agentQuery)) ||
-          (row.AgentLabel && row.AgentLabel.toLowerCase().includes(agentQuery)) ||
-          (row.AgentExt && row.AgentExt.toLowerCase().includes(agentQuery));
+        const agentValue = (row.AgentExt || row.AgentLabel || '').toString().toLowerCase();
+        const queueValue = (row.QueueNumber || row.QueueLabel || '').toString().toLowerCase();
+        const agentMatch = !selectedAgents.length || selectedAgents.includes(agentValue);
+        const queueMatch = !selectedQueues.length || selectedQueues.includes(queueValue);
 
         const dateSource = row.CallTime ?? row.Date ?? null;
         const dateObj = dateSource ? new Date(dateSource) : null;
         const validDate = dateObj instanceof Date && !Number.isNaN(dateObj);
         const dateOk = !validDate || ((!startDate || dateObj >= startDate) && (!endDate || dateObj <= endDate));
 
+        const hasHour = row.Hour !== '' && row.Hour !== null && row.Hour !== undefined;
+        const hourOk = !hasHour ||
+          (startHour === null && endHour === null) ||
+          ((startHour === null || Number(row.Hour) >= startHour) && (endHour === null || Number(row.Hour) <= endHour));
+
         const dirOk = !selectedDirections.length || selectedDirections.includes(dir);
         const statusOk = !selectedStatuses.length || selectedStatuses.includes(status);
-        return agentMatch && dateOk && dirOk && statusOk;
+        return agentMatch && queueMatch && dateOk && hourOk && dirOk && statusOk;
       });
 
       renderKPIs();
