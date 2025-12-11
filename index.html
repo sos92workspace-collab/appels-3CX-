@@ -170,6 +170,21 @@
     </section>
 
     <section>
+      <h2>Référentiels suivis</h2>
+      <p class="muted">Liste fournie pour croiser rapidement les extensions utilisateurs et les files d'attente 3CX.</p>
+      <div class="grid">
+        <div>
+          <h3>Extensions</h3>
+          <div id="tracked-extensions"></div>
+        </div>
+        <div>
+          <h3>Files d'attente</h3>
+          <div id="tracked-queues"></div>
+        </div>
+      </div>
+    </section>
+
+    <section>
       <h2>3) Indicateurs clés</h2>
       <div class="kpi-grid" id="kpi-container"></div>
     </section>
@@ -212,6 +227,81 @@
     const dataTable = document.getElementById('data-table');
     const saveStatus = document.getElementById('save-status');
     const pasteInput = document.getElementById('paste-input');
+    const trackedExtensionsContainer = document.getElementById('tracked-extensions');
+    const trackedQueuesContainer = document.getElementById('tracked-queues');
+
+    const TRACKED_EXTENSIONS = [
+      { ext: '100', name: 'Abder Amazit' },
+      { ext: '101', name: 'Ines Rodrigues' },
+      { ext: '102', name: 'Imène Dikhissi' },
+      { ext: '103', name: 'Bérangère Bai' },
+      { ext: '104', name: 'Bassi Ouled Beidou' },
+      { ext: '105', name: 'Christelle Vigee' },
+      { ext: '106', name: 'Katia Raini' },
+      { ext: '107', name: 'Compte en attente (1)' },
+      { ext: '108', name: 'Mariam Chafai' },
+      { ext: '109', name: 'Mariama Gassama' },
+      { ext: '110', name: 'Mayana Augustin' },
+      { ext: '111', name: 'Myreille Noel' },
+      { ext: '112', name: 'Myriam Chenaf' },
+      { ext: '113', name: 'Nathalie Beaussart' },
+      { ext: '114', name: 'Sabrina Meskine' },
+      { ext: '115', name: 'Sandrine Semedo Gonçalves' },
+      { ext: '116', name: 'Salma Meskine' },
+      { ext: '118', name: 'Mael Cosnet' },
+      { ext: '123', name: 'Reynald Celini' },
+      { ext: '124', name: 'Maud Autonomis' },
+      { ext: '125', name: 'Hanane Abbadi' },
+      { ext: '126', name: 'Aéline Njem belle Ekwe' },
+      { ext: '127', name: 'Autonomis 1' },
+      { ext: '128', name: 'Autonomis 2' },
+    ];
+
+    const TRACKED_QUEUES = [
+      { number: '800', label: 'Annulation', group: 'Standard', associated: '0146037744 (SVI – ligne patient)' },
+      { number: '801', label: 'Visite_Dom', group: 'Standard', associated: '0146037744 (SVI – ligne patient)' },
+      { number: '802', label: 'Consult_Teleconsult', group: 'Standard', associated: '0146037744 (SVI – ligne patient)' },
+      { number: '803', label: 'Demande_Admin', group: 'Standard', associated: '0146037744 (SVI – ligne patient)' },
+      { number: '804', label: 'Medecin', group: 'Standard', associated: '146032345 (Medecin)' },
+      { number: '805', label: 'Autonomis', group: 'Autonomis', associated: '973793043 (Ligne AUTONOMIS)' },
+      { number: '806', label: 'Sobel', group: 'SOS92', associated: '146032369 (Sobel)' },
+      { number: '807', label: 'Samu', group: '—', associated: '146032110 (Samu)' },
+      { number: '808', label: 'RH', group: '—', associated: '146037678' },
+      { number: '809', label: 'Prioritaire', group: 'N/C', associated: '—' },
+      { number: '810', label: 'Assistance (Med evasan)', group: 'Standard', associated: '146038538' },
+      { number: '811', label: 'FERMETURE CP (Répondeur numérique)', group: 'N/C', associated: '—' },
+      { number: '812', label: 'Dr. Bolourian', group: 'Standard', associated: 'N/C' },
+      { number: '880', label: 'demo', group: '—', associated: '146037577' },
+    ];
+
+    const trackedExtensionMap = new Map(TRACKED_EXTENSIONS.map((entry) => [entry.ext, entry.name]));
+    const trackedQueueMap = new Map(TRACKED_QUEUES.map((entry) => [entry.number, entry]));
+
+    function renderReferenceTables() {
+      if (trackedExtensionsContainer) {
+        const html = `
+          <table>
+            <thead><tr><th>Extension</th><th>Nom</th></tr></thead>
+            <tbody>
+              ${TRACKED_EXTENSIONS.map((entry) => `<tr><td>${entry.ext}</td><td>${entry.name}</td></tr>`).join('')}
+            </tbody>
+          </table>`;
+        trackedExtensionsContainer.innerHTML = html;
+      }
+
+      if (trackedQueuesContainer) {
+        const html = `
+          <table>
+            <thead><tr><th>Numéro</th><th>Libellé</th><th>Groupe</th><th>Numéro associé</th></tr></thead>
+            <tbody>
+              ${TRACKED_QUEUES.map(
+                (entry) => `<tr><td>${entry.number}</td><td>${entry.label}</td><td>${entry.group}</td><td>${entry.associated}</td></tr>`,
+              ).join('')}
+            </tbody>
+          </table>`;
+        trackedQueuesContainer.innerHTML = html;
+      }
+    }
 
     let rawData = [];
     let filteredData = [];
@@ -459,6 +549,9 @@
       return Number.isFinite(numeric) ? numeric : 0;
     }
 
+    const trackedExtensionNumbers = TRACKED_EXTENSIONS.map((entry) => entry.ext);
+    const trackedQueueNumbers = TRACKED_QUEUES.map((entry) => entry.number);
+
     function extractAgent(from, to) {
       const regex = /([^()]+?)\s*\((\d{2,})\)/;
       const candidates = [from, to];
@@ -469,6 +562,28 @@
         }
       }
       return { name: '', ext: '' };
+    }
+
+    function findTrackedExtension(...fields) {
+      for (const field of fields) {
+        const text = (field || '').toString();
+        for (const ext of trackedExtensionNumbers) {
+          const regex = new RegExp(`\\b${ext}\\b`);
+          if (regex.test(text)) return ext;
+        }
+      }
+      return '';
+    }
+
+    function findTrackedQueue(...fields) {
+      for (const field of fields) {
+        const text = (field || '').toString();
+        for (const number of trackedQueueNumbers) {
+          const regex = new RegExp(`\\b${number}\\b`);
+          if (regex.test(text)) return trackedQueueMap.get(number);
+        }
+      }
+      return null;
     }
 
     function categorizeCall(direction, to, details) {
@@ -537,6 +652,9 @@
 
         const callTime = parseDateTime(callTimeRaw);
         const agent = extractAgent(from, to);
+        const queueInfo = findTrackedQueue(from, to, details);
+        const extension = agent.ext || findTrackedExtension(from, to);
+        const agentName = agent.name || trackedExtensionMap.get(extension) || '';
         const record = {
           'Call ID': callId,
           'Call Time': callTimeRaw,
@@ -545,8 +663,15 @@
           Direction: direction,
           Status: status,
           'Call Activity Details': details,
-          AgentName: agent.name,
-          AgentExt: agent.ext,
+          AgentName: agentName || agent.name,
+          AgentLabel: agentName || agent.name || (extension ? `Ext ${extension}` : ''),
+          AgentExt: extension,
+          AgentTracked: Boolean(extension && trackedExtensionMap.has(extension)),
+          QueueNumber: queueInfo?.number || '',
+          QueueLabel: queueInfo?.label || '',
+          QueueGroup: queueInfo?.group || '',
+          QueueAssociated: queueInfo?.associated || '',
+          QueueTracked: Boolean(queueInfo),
           RingingSeconds: convertDuration(ringing),
           TalkingSeconds: convertDuration(talking),
           DirectionClean: (direction || '').toString().trim(),
@@ -618,6 +743,7 @@
         const status = (row.StatusClean || '').toLowerCase();
         const agentMatch = !agentQuery ||
           (row.AgentName && row.AgentName.toLowerCase().includes(agentQuery)) ||
+          (row.AgentLabel && row.AgentLabel.toLowerCase().includes(agentQuery)) ||
           (row.AgentExt && row.AgentExt.toLowerCase().includes(agentQuery));
 
         const dateSource = row.CallTime ?? row.Date ?? null;
@@ -664,10 +790,12 @@
     function renderAgentTable() {
       const grouped = {};
       filteredData.forEach((row) => {
-        const key = row.AgentName || row.AgentExt || 'Inconnu';
+        const key = row.AgentLabel || row.AgentName || row.AgentExt || 'Inconnu';
         if (!grouped[key]) {
           grouped[key] = {
             Agent: key,
+            Ext: row.AgentExt || '',
+            Tracked: Boolean(row.AgentTracked),
             Appels: 0,
             Répondus: 0,
             Manqués: 0,
@@ -702,7 +830,7 @@
               .map(
                 (r) => `
                   <tr>
-                    <td>${r.Agent}</td>
+                    <td>${r.Agent}${r.Ext ? ` (${r.Ext})` : ''}${r.Tracked ? ' ⭐' : ''}</td>
                     <td>${r.Appels}</td>
                     <td><span class="badge success">${r.Répondus}</span></td>
                     <td><span class="badge warn">${r.Manqués}</span></td>
@@ -720,7 +848,23 @@
         dataTable.innerHTML = '<p class="muted">Aucune donnée à afficher.</p>';
         return;
       }
-      const headers = ['Call Time', 'From', 'To', 'Direction', 'Status', 'AgentName', 'AgentExt', 'CallType', 'TalkingSeconds', 'RingingSeconds'];
+      const headers = [
+        'Call Time',
+        'From',
+        'To',
+        'Direction',
+        'Status',
+        'AgentLabel',
+        'AgentExt',
+        'AgentTracked',
+        'QueueLabel',
+        'QueueNumber',
+        'QueueGroup',
+        'QueueAssociated',
+        'CallType',
+        'TalkingSeconds',
+        'RingingSeconds',
+      ];
       const html = `
         <table>
           <thead>
@@ -798,6 +942,7 @@
       URL.revokeObjectURL(url);
     }
 
+    renderReferenceTables();
     restoreFromIndexedDB();
   </script>
 </body>
