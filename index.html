@@ -258,8 +258,10 @@
         return;
       }
       const merged = rawData.concat(rows);
-      rawData = buildDataset(merged);
-      fileSummary.textContent = `${summaryLabel} – ${rawData.length} lignes après nettoyage.`;
+      const { rows: cleaned, duplicates } = buildDataset(merged);
+      rawData = cleaned;
+      const duplicateNote = duplicates ? ` (${duplicates} doublon(s) ignoré(s) sur ${merged.length} lignes chargées)` : '';
+      fileSummary.textContent = `${summaryLabel} – ${rawData.length} lignes après nettoyage${duplicateNote}.`;
       populateFilters(rawData);
       applyFilters();
     }
@@ -422,6 +424,7 @@
     function buildDataset(rows) {
       const unique = new Map();
       let duplicateCounter = 0;
+      let ignoredDuplicates = 0;
 
       rows.forEach((row, idx) => {
         const normalized = normalizeRecord(row);
@@ -460,19 +463,26 @@
           Hour: callTime ? callTime.getHours() : '',
         };
         record.CallType = categorizeCall(record.DirectionClean, record.To, record['Call Activity Details']);
-        const baseKey = record['Call ID']
-          || (record.CallTime ? `${record.CallTime.toISOString?.() || record.CallTime}` : '')
-          || `${record.From}-${record.To}-${record.StatusClean}-${idx}`;
 
-        let key = baseKey || `row-${idx}`;
-        while (unique.has(key)) {
+        const keyParts = [];
+        if (record['Call ID']) keyParts.push(`id:${record['Call ID']}`);
+        if (record.CallTime) {
+          const asIso = record.CallTime instanceof Date ? record.CallTime.toISOString() : record.CallTime;
+          keyParts.push(`time:${asIso}`);
+        }
+        if (!keyParts.length) keyParts.push(`line:${idx}`);
+
+        const baseKey = keyParts.join('|');
+        let key = baseKey;
+        if (unique.has(key)) {
+          ignoredDuplicates += 1;
+          key = `${baseKey}#${duplicateCounter}`;
           duplicateCounter += 1;
-          key = `${baseKey || 'row'}-dup${duplicateCounter}`;
         }
 
         unique.set(key, record);
       });
-      return Array.from(unique.values());
+      return { rows: Array.from(unique.values()), duplicates: ignoredDuplicates };
     }
 
     function populateFilters(data) {
