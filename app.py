@@ -22,23 +22,50 @@ import streamlit as st
 def read_csv_file(uploaded_file: st.runtime.uploaded_file_manager.UploadedFile) -> pd.DataFrame:
     """Lit un fichier CSV 3CX téléversé et retourne un DataFrame pandas.
 
-    La fonction est tolérante au séparateur (`,` par défaut) et aux colonnes
-    supplémentaires. En cas d'erreur d'encodage, un second essai est fait en
-    latin-1 pour éviter de bloquer l'utilisateur.
+    L'import tente plusieurs séparateurs et encodages pour être robuste face
+    aux exports 3CX paramétrés en français (séparateur `;`) ou en anglais
+    (séparateur `,`). En cas d'échec, un message explicite est affiché à
+    l'utilisateur.
     """
 
-    try:
-        return pd.read_csv(uploaded_file)
-    except UnicodeDecodeError:
+    def _try_read(*, sep, encoding):
         uploaded_file.seek(0)
-        return pd.read_csv(uploaded_file, encoding="latin-1")
+        return pd.read_csv(uploaded_file, sep=sep, engine="python", encoding=encoding)
+
+    # Tente automatiquement de détecter le séparateur puis bascule sur les
+    # séparateurs les plus fréquents. Deux encodages sont essayés pour éviter
+    # les erreurs liées aux accents.
+    attempts = [
+        {"sep": None, "encoding": "utf-8"},
+        {"sep": ";", "encoding": "utf-8"},
+        {"sep": ",", "encoding": "utf-8"},
+        {"sep": None, "encoding": "latin-1"},
+        {"sep": ";", "encoding": "latin-1"},
+        {"sep": ",", "encoding": "latin-1"},
+    ]
+
+    for params in attempts:
+        try:
+            return _try_read(**params)
+        except UnicodeDecodeError:
+            # Passe à l'encodage suivant
+            continue
+        except pd.errors.ParserError:
+            # Essaye une autre combinaison séparateur/encodage
+            continue
+
+    st.error(
+        "Impossible de lire le fichier CSV. Vérifiez le séparateur (`,` ou `;`) "
+        "et réessayez."
+    )
+    return pd.DataFrame()
 
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Normalise les noms de colonnes en supprimant les espaces superflus."""
 
     df = df.copy()
-    df.columns = [str(col).strip() for col in df.columns]
+    df.columns = [str(col).strip().lstrip("\ufeff") for col in df.columns]
     return df
 
 
