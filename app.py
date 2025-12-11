@@ -184,11 +184,11 @@ def load_and_prepare_data(files) -> pd.DataFrame:
         return pd.DataFrame()
 
     combined = pd.concat(frames, ignore_index=True)
-    if {"Call ID", "Call Time"}.issubset(combined.columns):
-        combined = combined.drop_duplicates(subset=["Call ID", "Call Time"], keep="first")
-    elif "Call ID" in combined.columns:
-        combined = combined.drop_duplicates(subset=["Call ID"], keep="first")
-    return combined
+
+    # Supprime uniquement les doublons strictement identiques pour éviter de
+    # perdre des lignes distinctes partageant le même Call ID ou horodatage
+    # (plusieurs étapes d'un même appel, transferts, etc.).
+    return combined.drop_duplicates().reset_index(drop=True)
 
 
 def apply_filters(df: pd.DataFrame) -> pd.DataFrame:

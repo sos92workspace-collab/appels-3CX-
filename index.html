@@ -523,7 +523,7 @@
       const cleanedRows = [];
       let duplicateCounter = 0;
 
-      rows.forEach((row, idx) => {
+      rows.forEach((row) => {
         const normalized = normalizeRecord(row);
         const callTimeRaw = readField(normalized, ['Call Time', 'Call Start Time', 'Start Time', 'Date', 'Date/Heure', 'Debut']);
         const from = readField(normalized, ['From', 'De', 'Origine']);
@@ -561,15 +561,20 @@
         };
         record.CallType = categorizeCall(record.DirectionClean, record.To, record['Call Activity Details']);
 
-        const keyParts = [];
-        if (record['Call ID']) keyParts.push(`id:${record['Call ID']}`);
-        if (record.CallTime) {
-          const asIso = record.CallTime instanceof Date ? record.CallTime.toISOString() : record.CallTime;
-          keyParts.push(`time:${asIso}`);
-        }
-        if (!keyParts.length) keyParts.push(`line:${idx}`);
-
-        const key = keyParts.join('|');
+        const callTimeKey = record.CallTime instanceof Date
+          ? record.CallTime.toISOString()
+          : (record.CallTime || '');
+        const key = [
+          record['Call ID'] || '',
+          callTimeKey,
+          record.From || '',
+          record.To || '',
+          record.DirectionClean || '',
+          record.StatusClean || '',
+          record['Call Activity Details'] || '',
+          record.RingingSeconds ?? '',
+          record.TalkingSeconds ?? '',
+        ].join('|');
         const occurrence = occurrences.get(key) ?? 0;
         occurrences.set(key, occurrence + 1);
 
