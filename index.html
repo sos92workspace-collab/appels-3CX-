@@ -354,7 +354,9 @@
       const merged = rawData.concat(rows);
       const { rows: cleaned, duplicates } = buildDataset(merged);
       rawData = cleaned;
-      const duplicateNote = duplicates ? ` (${duplicates} doublon(s) détecté(s) sur ${merged.length} lignes chargées)` : '';
+      const duplicateNote = duplicates
+        ? ` (${duplicates} doublon(s) ignoré(s) sur ${merged.length} lignes chargées)`
+        : '';
       fileSummary.textContent = `${summaryLabel} – ${rawData.length} lignes après nettoyage${duplicateNote}.`;
       await persistDataset(rawData);
       populateFilters(rawData);
@@ -570,9 +572,13 @@
         const key = keyParts.join('|');
         const occurrence = occurrences.get(key) ?? 0;
         occurrences.set(key, occurrence + 1);
-        if (occurrence > 0) duplicateCounter += 1;
 
-        cleanedRows.push({ ...record, __occurrence: occurrence });
+        if (occurrence > 0) {
+          duplicateCounter += 1;
+          return; // on ignore les doublons pour éviter le comptage multiple
+        }
+
+        cleanedRows.push(record);
       });
       return { rows: cleanedRows, duplicates: duplicateCounter };
     }
