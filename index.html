@@ -181,21 +181,6 @@
     </section>
 
     <section>
-      <h2>Référentiels suivis</h2>
-      <p class="muted">Liste fournie pour croiser rapidement les extensions utilisateurs et les files d'attente 3CX.</p>
-      <div class="grid">
-        <div>
-          <h3>Extensions</h3>
-          <div id="tracked-extensions"></div>
-        </div>
-        <div>
-          <h3>Files d'attente</h3>
-          <div id="tracked-queues"></div>
-        </div>
-      </div>
-    </section>
-
-    <section>
       <h2>3) Indicateurs clés</h2>
       <div class="kpi-grid" id="kpi-container"></div>
     </section>
@@ -241,8 +226,6 @@
     const dataTable = document.getElementById('data-table');
     const saveStatus = document.getElementById('save-status');
     const pasteInput = document.getElementById('paste-input');
-    const trackedExtensionsContainer = document.getElementById('tracked-extensions');
-    const trackedQueuesContainer = document.getElementById('tracked-queues');
 
     const TRACKED_EXTENSIONS = [
       { ext: '100', name: 'Abder Amazit' },
@@ -290,32 +273,6 @@
 
     const trackedExtensionMap = new Map(TRACKED_EXTENSIONS.map((entry) => [entry.ext, entry.name]));
     const trackedQueueMap = new Map(TRACKED_QUEUES.map((entry) => [entry.number, entry]));
-
-    function renderReferenceTables() {
-      if (trackedExtensionsContainer) {
-        const html = `
-          <table>
-            <thead><tr><th>Extension</th><th>Nom</th></tr></thead>
-            <tbody>
-              ${TRACKED_EXTENSIONS.map((entry) => `<tr><td>${entry.ext}</td><td>${entry.name}</td></tr>`).join('')}
-            </tbody>
-          </table>`;
-        trackedExtensionsContainer.innerHTML = html;
-      }
-
-      if (trackedQueuesContainer) {
-        const html = `
-          <table>
-            <thead><tr><th>Numéro</th><th>Libellé</th><th>Groupe</th><th>Numéro associé</th></tr></thead>
-            <tbody>
-              ${TRACKED_QUEUES.map(
-                (entry) => `<tr><td>${entry.number}</td><td>${entry.label}</td><td>${entry.group}</td><td>${entry.associated}</td></tr>`,
-              ).join('')}
-            </tbody>
-          </table>`;
-        trackedQueuesContainer.innerHTML = html;
-      }
-    }
 
     let rawData = [];
     let filteredData = [];
@@ -678,12 +635,14 @@
           Status: status,
           'Call Activity Details': details,
           AgentName: agentName || agent.name,
-          AgentLabel: agentName || agent.name || (extension ? `Ext ${extension}` : ''),
+          AgentLabel: extension
+            ? `${extension} – ${agentName || agent.name || 'Extension inconnue'}`
+            : agentName || agent.name,
           AgentExt: extension,
           AgentTracked: Boolean(extension && trackedExtensionMap.has(extension)),
           QueueNumber: queueInfo?.number || '',
           QueueLabel: queueInfo?.label || '',
-          QueueGroup: queueInfo?.group || '',
+          QueueGroup: queueInfo?.group || queueInfo?.label || '',
           QueueAssociated: queueInfo?.associated || '',
           QueueTracked: Boolean(queueInfo),
           RingingSeconds: convertDuration(ringing),
@@ -730,39 +689,59 @@
     function populateFilters(data) {
       const directions = Array.from(new Set(data.map((d) => d.DirectionClean).filter(Boolean))).sort();
       const statuses = Array.from(new Set(data.map((d) => d.StatusClean).filter(Boolean))).sort();
-      directionSelect.innerHTML = directions.map((dir) => `<option value="${dir}">${dir}</option>`).join('');
-      statusSelect.innerHTML = statuses.map((st) => `<option value="${st}">${st}</option>`).join('');
-
-      const agentOptions = Array.from(
-        new Map(
-          data
-            .filter((d) => d.AgentExt || d.AgentLabel)
-            .map((d) => {
-              const value = (d.AgentExt || d.AgentLabel || '').toString();
-              const label = d.AgentLabel || (d.AgentExt ? `Ext ${d.AgentExt}` : value);
-              return [value.toLowerCase(), { value, label }];
-            }),
-        ).values(),
-      ).sort((a, b) => a.label.localeCompare(b.label, 'fr'));
-
-      agentSelect.innerHTML = agentOptions
-        .map((agent) => `<option value="${agent.value}">${agent.label}</option>`)
+      directionSelect.innerHTML = ['<option value="__all__" selected>Toutes les directions</option>']
+        .concat(directions.map((dir) => `<option value="${dir}">${dir}</option>`))
+        .join('');
+      statusSelect.innerHTML = ['<option value="__all__" selected>Tous les statuts</option>']
+        .concat(statuses.map((st) => `<option value="${st}">${st}</option>`))
         .join('');
 
-      const queueOptions = Array.from(
-        new Map(
-          data
-            .filter((d) => d.QueueLabel || d.QueueNumber)
-            .map((d) => {
-              const value = (d.QueueNumber || d.QueueLabel || '').toString();
-              const label = [d.QueueLabel, d.QueueNumber].filter(Boolean).join(' · ');
-              return [value.toLowerCase(), { value, label: label || value }];
-            }),
-        ).values(),
-      ).sort((a, b) => a.label.localeCompare(b.label, 'fr'));
+      const agentOptionsMap = new Map();
+      TRACKED_EXTENSIONS.forEach(({ ext, name }) => {
+        agentOptionsMap.set(ext.toLowerCase(), { value: ext, label: `${ext} – ${name}` });
+      });
 
-      queueSelect.innerHTML = queueOptions
-        .map((queue) => `<option value="${queue.value}">${queue.label}</option>`)
+      data
+        .filter((d) => d.AgentExt || d.AgentLabel)
+        .forEach((d) => {
+          const value = (d.AgentExt || d.AgentLabel || '').toString();
+          const ext = (d.AgentExt || '').toString();
+          const trackedName = trackedExtensionMap.get(ext);
+          const label = ext
+            ? `${ext} – ${trackedName || d.AgentLabel || 'Extension'}`
+            : d.AgentLabel || value;
+          agentOptionsMap.set(value.toLowerCase(), { value, label });
+        });
+
+      const agentOptions = Array.from(agentOptionsMap.values()).sort((a, b) =>
+        a.label.localeCompare(b.label, 'fr'),
+      );
+
+      agentSelect.innerHTML = ['<option value="__all__" selected>Tous les utilisateurs</option>']
+        .concat(agentOptions.map((agent) => `<option value="${agent.value}">${agent.label}</option>`))
+        .join('');
+
+      const queueOptionsMap = new Map();
+      TRACKED_QUEUES.forEach((entry) => {
+        const value = entry.number;
+        const label = `${entry.number} – ${entry.label}`;
+        queueOptionsMap.set(value.toLowerCase(), { value, label });
+      });
+
+      data
+        .filter((d) => d.QueueLabel || d.QueueNumber)
+        .forEach((d) => {
+          const value = (d.QueueNumber || d.QueueLabel || '').toString();
+          const label = [d.QueueNumber, d.QueueLabel].filter(Boolean).join(' – ');
+          queueOptionsMap.set(value.toLowerCase(), { value, label: label || value });
+        });
+
+      const queueOptions = Array.from(queueOptionsMap.values()).sort((a, b) =>
+        a.label.localeCompare(b.label, 'fr'),
+      );
+
+      queueSelect.innerHTML = ['<option value="__all__" selected>Toutes les files</option>']
+        .concat(queueOptions.map((queue) => `<option value="${queue.value}">${queue.label}</option>`))
         .join('');
 
       const dates = data.map((d) => d.Date).filter(Boolean).sort();
@@ -781,10 +760,10 @@
 
     function applyFilters() {
       if (!rawData.length) return;
-      const selectedDirections = Array.from(directionSelect.selectedOptions).map((o) => o.value.toLowerCase());
-      const selectedStatuses = Array.from(statusSelect.selectedOptions).map((o) => o.value.toLowerCase());
-      const selectedAgents = Array.from(agentSelect.selectedOptions).map((o) => o.value.toLowerCase());
-      const selectedQueues = Array.from(queueSelect.selectedOptions).map((o) => o.value.toLowerCase());
+      const selectedDirections = extractSelection(directionSelect);
+      const selectedStatuses = extractSelection(statusSelect);
+      const selectedAgents = extractSelection(agentSelect);
+      const selectedQueues = extractSelection(queueSelect);
       const startDate = startDateInput.value ? new Date(startDateInput.value) : null;
       const endDate = endDateInput.value ? new Date(endDateInput.value) : null;
       const startHour = startHourInput.value !== '' ? Number(startHourInput.value) : null;
@@ -817,6 +796,11 @@
       renderAgentTable();
       renderDataTable();
       renderCharts();
+    }
+
+    function extractSelection(selectEl) {
+      const values = Array.from(selectEl.selectedOptions).map((o) => o.value.toLowerCase());
+      return values.includes('__all__') ? [] : values;
     }
 
     function renderKPIs() {
@@ -999,7 +983,6 @@
       URL.revokeObjectURL(url);
     }
 
-    renderReferenceTables();
     restoreFromIndexedDB();
   </script>
 </body>
