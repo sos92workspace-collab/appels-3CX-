@@ -26,7 +26,6 @@
       background: var(--bg);
       color: var(--text);
       min-height: 100vh;
-      padding: 0 1rem;
     }
     header {
       padding: 1.5rem 2rem;
@@ -36,22 +35,18 @@
       top: 0;
       backdrop-filter: blur(8px);
       z-index: 10;
-      max-width: 1200px;
-      margin: 0 auto;
-      width: 100%;
     }
     .brand { display: flex; align-items: center; gap: 1rem; }
-    .site-logo { height: 78px; width: auto; flex-shrink: 0; }
     h1 { margin: 0 0 0.3rem; font-size: 1.8rem; }
     p.subtitle { margin: 0; color: var(--muted); }
-    main { padding: 1.5rem 2rem 3rem; display: grid; gap: 1rem; max-width: 1200px; margin: 0 auto; width: 100%; }
+    main { padding: 1.5rem 2rem 3rem; display: grid; gap: 1rem; }
     section { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 1rem 1.25rem; }
     h2 { margin-top: 0; }
     .grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
     .controls { display: flex; gap: 0.75rem; flex-wrap: wrap; }
     .filters-grid {
       display: grid;
-      grid-template-columns: repeat(4, minmax(220px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
       gap: 0.75rem;
     }
     .filters-grid + .filters-grid { margin-top: 0.75rem; }
@@ -129,13 +124,7 @@
       border-top: 1px solid var(--border);
     }
     .stats-row.stats-charts { padding-top: 1.25rem; }
-    @media (max-width: 1100px) { .filters-grid { grid-template-columns: repeat(2, minmax(220px, 1fr)); } }
-    @media (max-width: 820px) {
-      header, main { padding-left: 1.25rem; padding-right: 1.25rem; }
-      .brand { flex-direction: column; align-items: flex-start; }
-      .site-logo { height: 64px; }
-      .filters-grid { grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
-    }
+    @media (max-width: 820px) { .brand { flex-direction: column; align-items: flex-start; } }
     @media (max-width: 780px) { .kpi-grid { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); } }
     @media (max-width: 680px) { header { position: static; } }
   </style>
@@ -143,7 +132,6 @@
 <body>
   <header>
     <div class="brand">
-      <img src="assets/logo-sos92.svg" alt="SOS92 - Garde et urgences médicales" class="site-logo" />
       <div>
         <h1>Analyse locale des appels 3CX</h1>
         <p class="subtitle">Chargez vos fichiers CSV, analysez hors-ligne, exportez et sauvegardez vos données directement dans le navigateur.</p>
@@ -218,8 +206,6 @@
 
     <section>
       <h2>4) Statistiques</h2>
-      <p class="muted">Les volumes sont consolidés au niveau <strong>Call ID</strong> pour éviter les doubles comptages des appels multi-lignes.</p>
-      <p class="muted">Lecture directionnelle : en sortie l’extension est l’émetteur (<strong>From</strong>), en entrée c’est le destinataire (<strong>To</strong>). Les extensions sont ensuite classées strictement : 100–130 (Standard), 132–345 (Médecins), ≥ 800 (Files), le reste en “Autre / Inconnu”.</p>
       <div class="stats-row">
         <div>
           <h3>Bloc Standard</h3>
@@ -854,7 +840,12 @@
         answeredLabel: 'Appels réussis',
         showDirectionBreakdown: true,
       });
-      renderCategoryTable(queueStats, extensionAggregates.queue || [], {
+      const queueRows = (extensionAggregates.queue || []).map((row) => ({
+        ...row,
+        answered: Math.max(0, (row.calls || 0) - (row.failures || 0)),
+      }));
+
+      renderCategoryTable(queueStats, queueRows, {
         failureLabel: 'Appels perdus',
       });
       renderDataTable();
@@ -1022,7 +1013,7 @@
       }
 
       const directionHeaders = showDirectionBreakdown
-        ? '<th>Nombre entrants</th><th>Nombre sortants</th>'
+        ? '<th>Appels entrants</th><th>Appels sortants</th>'
         : '';
 
       const html = `
