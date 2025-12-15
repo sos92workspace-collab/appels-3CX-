@@ -97,22 +97,41 @@ def convert_duration_to_seconds(series: pd.Series) -> pd.Series:
 
 
 def extract_agent_info(df: pd.DataFrame) -> pd.DataFrame:
-    """Extrait le nom et l'extension d'agent depuis les colonnes From/To."""
+    """Extrait les noms/extensions depuis From/To en respectant la direction."""
 
     df = df.copy()
     pattern = re.compile(r"(?P<name>[^()]+?)\s*\((?P<ext>\d{2,})\)")
 
-    def _extract(row):
-        for field in ["From", "To"]:
-            value = row.get(field, "")
-            match = pattern.search(str(value))
-            if match:
-                name = match.group("name").strip()
-                ext = match.group("ext")
-                return pd.Series({"AgentName": name, "AgentExt": ext})
-        return pd.Series({"AgentName": pd.NA, "AgentExt": pd.NA})
+    def _parse_contact(value: str) -> pd.Series:
+        match = pattern.search(str(value))
+        if match:
+            return pd.Series({
+                "Name": match.group("name").strip(),
+                "Ext": match.group("ext"),
+            })
+        return pd.Series({"Name": pd.NA, "Ext": pd.NA})
 
-    agent_info = df.apply(_extract, axis=1)
+    from_info = df["From"].apply(_parse_contact)
+    to_info = df["To"].apply(_parse_contact)
+
+    df["FromName"] = from_info["Name"]
+    df["FromExtension"] = from_info["Ext"]
+    df["ToName"] = to_info["Name"]
+    df["ToExtension"] = to_info["Ext"]
+
+    def _select_agent(row):
+        direction = str(row.get("Direction", "")).strip().lower()
+        if direction.startswith("inbound"):
+            return pd.Series({"AgentName": row["ToName"], "AgentExt": row["ToExtension"]})
+        if direction.startswith("outbound"):
+            return pd.Series({"AgentName": row["FromName"], "AgentExt": row["FromExtension"]})
+
+        # Par défaut, on tente d'abord To puis From pour les appels internes/autres
+        if pd.notna(row["ToExtension"]):
+            return pd.Series({"AgentName": row["ToName"], "AgentExt": row["ToExtension"]})
+        return pd.Series({"AgentName": row["FromName"], "AgentExt": row["FromExtension"]})
+
+    agent_info = df.apply(_select_agent, axis=1)
     df["AgentName"] = agent_info["AgentName"]
     df["AgentExt"] = agent_info["AgentExt"]
     return df
@@ -152,6 +171,96 @@ def add_derived_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     df["CallType"] = df.apply(categorize, axis=1)
     return df
+
+
+def to_numeric_extension(series: pd.Series) -> pd.Series:
+    """Convertit une série d'extensions en nombres en ignorant les erreurs."""
+
+    return pd.to_numeric(series, errors="coerce")
+
+
+def build_aggregated_calls(df: pd.DataFrame) -> pd.DataFrame:
+    """Construit une table dédupliquée par Call ID avec agent décroché et file.
+
+    Règles appliquées (identiques dans tout le code) :
+    - Agent décroché : première ligne Status="Answered" dont l'extension extraite
+      est comprise entre 100 et 130 (Standard), triée par Call Time croissant.
+    - File retenue : dernière file (extension To >= 800 et != 992, ou Direction
+      "Inbound Queue") rencontrée avant le décroché de l'agent. À défaut, la
+      valeur "Sans file" est utilisée.
+    - Déduplication : 1 ligne par couple (Call ID, agent) pour les appels
+      décroché, ce qui évite de compter plusieurs fois un même appel.
+    """
+
+    if df.empty:
+        return pd.DataFrame()
+
+    work = df.copy()
+    work["AgentExtNum"] = to_numeric_extension(work["AgentExt"])
+    work["ToExtensionNum"] = to_numeric_extension(work["ToExtension"])
+
+    def _aggregate_call(call_id: str, group: pd.DataFrame):
+        ordered = group.sort_values("Call Time")
+
+        answered_agents = ordered[
+            (ordered["Status"].str.lower() == "answered")
+            & (ordered["AgentExtNum"].between(100, 130, inclusive="both"))
+        ]
+        if answered_agents.empty:
+            return None
+
+        # On retient le premier agent qui décroche (transfert géré en amont).
+        agent_row = answered_agents.iloc[0]
+
+        # Recherche de la file pertinente avant le décroché
+        call_time = agent_row["Call Time"]
+        queue_candidates = ordered[
+            (
+                (ordered["ToExtensionNum"] >= 800)
+                & (ordered["ToExtensionNum"] != 992)
+            )
+            | (
+                ordered["Direction"].str.strip().str.lower()
+                == "inbound queue"
+            )
+        ]
+
+        if pd.notna(call_time):
+            queue_candidates = queue_candidates[queue_candidates["Call Time"] <= call_time]
+
+        queue_candidates = queue_candidates.sort_values("Call Time")
+        queue_value = "Sans file"
+        if not queue_candidates.empty:
+            last_queue = queue_candidates.iloc[-1]
+            queue_value = last_queue.get("ToExtension") or queue_value
+
+        return {
+            "Call ID": call_id,
+            "AgentExt": agent_row.get("AgentExt"),
+            "AgentName": agent_row.get("AgentName"),
+            "Direction": agent_row.get("Direction"),
+            "Status": agent_row.get("Status"),
+            "CallType": agent_row.get("CallType"),
+            "Call Time": agent_row.get("Call Time"),
+            "Date": agent_row.get("Date"),
+            "Year": agent_row.get("Year"),
+            "Month": agent_row.get("Month"),
+            "Week": agent_row.get("Week"),
+            "DayOfWeek": agent_row.get("DayOfWeek"),
+            "Hour": agent_row.get("Hour"),
+            "RingingSeconds": agent_row.get("RingingSeconds"),
+            "TalkingSeconds": agent_row.get("TalkingSeconds"),
+            "CallDurationSeconds": agent_row.get("CallDurationSeconds"),
+            "RetainedQueue": queue_value,
+        }
+
+    records = []
+    for call_id, group in work.groupby("Call ID"):
+        aggregated = _aggregate_call(call_id, group)
+        if aggregated:
+            records.append(aggregated)
+
+    return pd.DataFrame.from_records(records)
 
 
 def validate_required_columns(df: pd.DataFrame, filename: str) -> List[str]:
@@ -239,21 +348,23 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
     if statuses:
         mask &= df["Status"].isin(statuses)
 
-    # Filtre texte sur Call Activity Details
-    search_text = st.sidebar.text_input("Recherche dans Call Activity Details")
-    if search_text:
-        mask &= df["Call Activity Details"].fillna("").str.contains(search_text, case=False, na=False)
+    # Filtre texte sur Call Activity Details (optionnel)
+    if "Call Activity Details" in df.columns:
+        search_text = st.sidebar.text_input("Recherche dans Call Activity Details")
+        if search_text:
+            mask &= df["Call Activity Details"].fillna("").str.contains(search_text, case=False, na=False)
 
     # Filtre sur durée
-    min_dur = float(df["CallDurationSeconds"].min() or 0)
-    max_dur = float(df["CallDurationSeconds"].max() or 0)
+    min_dur = float(df.get("CallDurationSeconds", pd.Series([0])).min() or 0)
+    max_dur = float(df.get("CallDurationSeconds", pd.Series([0])).max() or 0)
     duration_range = st.sidebar.slider(
         "Durée d'appel (secondes)",
         min_value=0.0,
         max_value=max(max_dur, 0.0),
         value=(min_dur, max_dur),
     )
-    mask &= df["CallDurationSeconds"].between(duration_range[0], duration_range[1])
+    if "CallDurationSeconds" in df.columns:
+        mask &= df["CallDurationSeconds"].between(duration_range[0], duration_range[1])
 
     return df[mask].copy()
 
@@ -302,6 +413,21 @@ def stats_by_agent(df: pd.DataFrame) -> pd.DataFrame:
         AvgRingingSeconds=("RingingSeconds", "mean"),
     ).reset_index()
     return result
+
+
+def stats_by_queue(df: pd.DataFrame) -> pd.DataFrame:
+    """Retourne les volumes par file retenue (exclusion 992)."""
+
+    if df.empty or "RetainedQueue" not in df.columns:
+        return pd.DataFrame()
+
+    filtered = df[df["RetainedQueue"].notna() & (df["RetainedQueue"] != "992")]
+    return (
+        filtered.groupby("RetainedQueue")
+        .agg(AnsweredCalls=("Call ID", "count"))
+        .reset_index()
+        .sort_values("AnsweredCalls", ascending=False)
+    )
 
 
 def render_time_charts(df: pd.DataFrame):
@@ -401,15 +527,31 @@ def main():
 
     render_file_summary(uploaded_files, data)
 
-    st.subheader("Indicateurs clés (global)")
-    compute_kpis(data)
+    aggregated_calls = build_aggregated_calls(data)
+    if aggregated_calls.empty:
+        st.warning(
+            "Aucun appel décroché par les agents du standard (extensions 100–130) "
+            "n'a été identifié. Vérifiez le statut Answered dans vos exports."
+        )
+        return
 
-    st.subheader("Statistiques par agent (global)")
-    st.dataframe(stats_by_agent(data))
+    st.info(
+        "Agrégation par Call ID : premier agent Standard qui décroche, "
+        "dernière file rencontrée avant décroché (exclusion de la file 992)."
+    )
 
-    render_time_charts(data)
+    st.subheader("Indicateurs clés (appels décroché)")
+    compute_kpis(aggregated_calls)
 
-    filtered = apply_filters(data)
+    st.subheader("Statistiques par agent (appels décroché)")
+    st.dataframe(stats_by_agent(aggregated_calls))
+
+    st.subheader("Répartition par files d'attente (global)")
+    st.dataframe(stats_by_queue(aggregated_calls))
+
+    render_time_charts(aggregated_calls)
+
+    filtered = apply_filters(aggregated_calls)
 
     st.subheader("Indicateurs clés (données filtrées)")
     compute_kpis(filtered)
@@ -417,9 +559,12 @@ def main():
     st.subheader("Statistiques par agent (données filtrées)")
     st.dataframe(stats_by_agent(filtered))
 
+    st.subheader("Répartition par files d'attente (données filtrées)")
+    st.dataframe(stats_by_queue(filtered))
+
     render_time_charts(filtered)
 
-    st.subheader("Données détaillées (après filtres)")
+    st.subheader("Données détaillées (appels agrégés après filtres)")
     st.dataframe(filtered.head(500))
 
     export_data(filtered)
