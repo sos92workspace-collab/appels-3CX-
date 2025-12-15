@@ -8,6 +8,9 @@ et statut. Tout tient dans ce fichier unique pour un lancement simple via
 
 import io
 import re
+import uuid
+from datetime import datetime
+from types import SimpleNamespace
 from typing import Iterable, List, Optional
 
 import altair as alt
@@ -501,73 +504,172 @@ def render_file_summary(files: Iterable, df: pd.DataFrame) -> None:
         st.caption(f"Période couverte : {df['Call Time'].min().date()} → {df['Call Time'].max().date()}")
 
 
+def ensure_import_state():
+    """Prépare le stockage des imports dans la session Streamlit."""
+
+    if "imports" not in st.session_state:
+        st.session_state.imports = []
+
+
+def register_import(file: st.runtime.uploaded_file_manager.UploadedFile) -> None:
+    """Ajoute un fichier importé dans l'état de session avec ses métadonnées."""
+
+    file_bytes = file.getvalue()
+    buffer = io.BytesIO(file_bytes)
+    buffer.name = file.name
+
+    prepared_df = load_and_prepare_data([buffer])
+    if prepared_df.empty:
+        st.warning(f"{file.name} n'a pas pu être chargé et a été ignoré.")
+        return
+
+    call_times = prepared_df["Call Time"].dropna()
+    period_min = call_times.min().date() if not call_times.empty else None
+    period_max = call_times.max().date() if not call_times.empty else None
+
+    st.session_state.imports.append(
+        {
+            "id": str(uuid.uuid4()),
+            "name": file.name,
+            "data": file_bytes,
+            "uploaded_at": datetime.now(),
+            "period_min": period_min,
+            "period_max": period_max,
+        }
+    )
+    st.success(f"{file.name} importé avec succès.")
+
+
+def build_data_from_imports(import_entries: List[dict]) -> pd.DataFrame:
+    """Recharge les fichiers importés pour produire le DataFrame complet."""
+
+    if not import_entries:
+        return pd.DataFrame()
+
+    buffers: List[io.BytesIO] = []
+    for entry in import_entries:
+        buffer = io.BytesIO(entry["data"])
+        buffer.name = entry["name"]
+        buffers.append(buffer)
+
+    return load_and_prepare_data(buffers)
+
+
+def render_import_tab():
+    """Affiche l'onglet Import pour téléverser et gérer les fichiers."""
+
+    st.subheader("1) Importer les CSV")
+    uploaded_files = st.file_uploader(
+        "Choisissez un ou plusieurs fichiers CSV", type="csv", accept_multiple_files=True, key="import_uploader"
+    )
+
+    if uploaded_files:
+        for file in uploaded_files:
+            register_import(file)
+
+    st.subheader("Historique des imports")
+    if not st.session_state.imports:
+        st.info("Aucun fichier importé pour le moment.")
+        return
+
+    for entry in list(st.session_state.imports):
+        date_text = entry["uploaded_at"].strftime("%d/%m/%Y %H:%M")
+        period_text = (
+            f"{entry['period_min']} → {entry['period_max']}"
+            if entry["period_min"] and entry["period_max"]
+            else "Période inconnue"
+        )
+
+        cols = st.columns([2, 4, 3, 1])
+        cols[0].write(date_text)
+        cols[1].write(entry["name"])
+        cols[2].write(period_text)
+        if cols[3].button("✖", key=f"delete_{entry['id']}"):
+            st.session_state.imports = [imp for imp in st.session_state.imports if imp["id"] != entry["id"]]
+            st.success(f"Import {entry['name']} supprimé.")
+            st.experimental_rerun()
+
+
 # -------------------------
 # Interface principale
 # -------------------------
 
 def main():
-    st.set_page_config(page_title="Analyse des appels 3CX – SOS92", layout="wide")
+    st.set_page_config(page_title="Analyse des appels 3CX – SOS92", layout="centered")
+    st.markdown(
+        """
+        <style>
+        .main .block-container {
+            max-width: 1100px;
+            padding-top: 2rem;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
     st.title("Analyse des appels 3CX – SOS92")
     st.write("Importez un ou plusieurs fichiers CSV 3CX pour analyser l'activité du standard.")
 
-    uploaded_files = st.file_uploader(
-        "Choisissez un ou plusieurs fichiers CSV",
-        type="csv",
-        accept_multiple_files=True,
-    )
+    ensure_import_state()
+    tabs = st.tabs(["Pilotage", "Import"])
 
-    if not uploaded_files:
-        st.info("Aucun fichier importé pour le moment.")
-        return
+    with tabs[1]:
+        render_import_tab()
 
-    data = load_and_prepare_data(uploaded_files)
-    if data.empty:
-        st.warning("Impossible de charger les données. Vérifiez le format des fichiers.")
-        return
+    with tabs[0]:
+        if not st.session_state.imports:
+            st.info("Aucun fichier importé pour le moment. Ajoutez des CSV dans l'onglet Import.")
+            return
 
-    render_file_summary(uploaded_files, data)
+        data = build_data_from_imports(st.session_state.imports)
+        if data.empty:
+            st.warning("Impossible de charger les données. Vérifiez le format des fichiers.")
+            return
 
-    aggregated_calls = build_aggregated_calls(data)
-    if aggregated_calls.empty:
-        st.warning(
-            "Aucun appel décroché par les agents du standard (extensions 100–130) "
-            "n'a été identifié. Vérifiez le statut Answered dans vos exports."
+        render_file_summary([SimpleNamespace(name=imp["name"]) for imp in st.session_state.imports], data)
+
+        aggregated_calls = build_aggregated_calls(data)
+        if aggregated_calls.empty:
+            st.warning(
+                "Aucun appel décroché par les agents du standard (extensions 100–130) "
+                "n'a été identifié. Vérifiez le statut Answered dans vos exports."
+            )
+            return
+
+        st.info(
+            "Agrégation par Call ID : premier agent Standard qui décroche, "
+            "dernière file rencontrée avant décroché (exclusion de la file 992)."
         )
-        return
 
-    st.info(
-        "Agrégation par Call ID : premier agent Standard qui décroche, "
-        "dernière file rencontrée avant décroché (exclusion de la file 992)."
-    )
+        st.subheader("Indicateurs clés (appels décroché)")
+        compute_kpis(aggregated_calls)
 
-    st.subheader("Indicateurs clés (appels décroché)")
-    compute_kpis(aggregated_calls)
+        st.subheader("Statistiques par agent (appels décroché)")
+        st.dataframe(stats_by_agent(aggregated_calls))
 
-    st.subheader("Statistiques par agent (appels décroché)")
-    st.dataframe(stats_by_agent(aggregated_calls))
+        st.subheader("Répartition par files d'attente (global)")
+        st.dataframe(stats_by_queue(aggregated_calls))
 
-    st.subheader("Répartition par files d'attente (global)")
-    st.dataframe(stats_by_queue(aggregated_calls))
+        render_time_charts(aggregated_calls)
 
-    render_time_charts(aggregated_calls)
+        filtered = apply_filters(aggregated_calls)
 
-    filtered = apply_filters(aggregated_calls)
+        st.subheader("Indicateurs clés (données filtrées)")
+        compute_kpis(filtered)
 
-    st.subheader("Indicateurs clés (données filtrées)")
-    compute_kpis(filtered)
+        st.subheader("Statistiques par agent (données filtrées)")
+        st.dataframe(stats_by_agent(filtered))
 
-    st.subheader("Statistiques par agent (données filtrées)")
-    st.dataframe(stats_by_agent(filtered))
+        st.subheader("Répartition par files d'attente (données filtrées)")
+        st.dataframe(stats_by_queue(filtered))
 
-    st.subheader("Répartition par files d'attente (données filtrées)")
-    st.dataframe(stats_by_queue(filtered))
+        render_time_charts(filtered)
 
-    render_time_charts(filtered)
+        st.subheader("Données détaillées (appels agrégés après filtres)")
+        st.dataframe(filtered.head(500))
 
-    st.subheader("Données détaillées (appels agrégés après filtres)")
-    st.dataframe(filtered.head(500))
-
-    export_data(filtered)
+        export_data(filtered)
 
 
 if __name__ == "__main__":
