@@ -1200,7 +1200,8 @@
         failureLabel: 'Appels perdus',
       });
 
-      renderCharts(scopedCalls);
+      renderDateChart(callAggregates);
+      renderHourChart(scopedCalls);
     }
 
     function buildScopedAggregates() {
@@ -1215,13 +1216,11 @@
       };
     }
 
-    function renderCharts(sourceAggregates = callAggregates) {
+    function renderDateChart(sourceAggregates = callAggregates) {
       const byDate = {};
-      const byHour = Array(24).fill(0);
 
       sourceAggregates.forEach((row) => {
         if (row.date) byDate[row.date] = (byDate[row.date] || 0) + 1;
-        if (row.hour !== '' && row.hour !== null && row.hour !== undefined) byHour[Number(row.hour)] += 1;
       });
 
       const dateLabels = Object.keys(byDate).sort((a, b) => new Date(a) - new Date(b));
@@ -1247,6 +1246,14 @@
           selectedDate = selectedDate === clickedDate ? null : clickedDate;
           renderSelectionAwareViews();
         },
+      });
+    }
+
+    function renderHourChart(sourceAggregates = callAggregates) {
+      const byHour = Array(24).fill(0);
+
+      sourceAggregates.forEach((row) => {
+        if (row.hour !== '' && row.hour !== null && row.hour !== undefined) byHour[Number(row.hour)] += 1;
       });
 
       createChart('hour-chart', 'bar', {
