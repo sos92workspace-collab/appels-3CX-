@@ -1050,24 +1050,63 @@ def render_pilotage_carte92_tab():
     default_start = st.session_state.get("pilotage92_start", min_date)
     default_end = st.session_state.get("pilotage92_end", max_date)
 
+    if "pilotage92_filters" not in st.session_state:
+        st.session_state.pilotage92_filters = {
+            "start_date": default_start,
+            "end_date": default_end,
+            "start_time": datetime.strptime("00:00", "%H:%M").time(),
+            "end_time": datetime.strptime("23:59", "%H:%M").time(),
+        }
+
     with st.form("pilotage_92_filters"):
         col1, col2 = st.columns(2)
-        start_date = col1.date_input("Date de début", value=default_start, min_value=min_date, max_value=max_date)
-        end_date = col2.date_input("Date de fin", value=default_end, min_value=min_date, max_value=max_date)
+        start_date = col1.date_input(
+            "Date de début",
+            value=st.session_state.pilotage92_filters["start_date"],
+            min_value=min_date,
+            max_value=max_date,
+        )
+        end_date = col2.date_input(
+            "Date de fin",
+            value=st.session_state.pilotage92_filters["end_date"],
+            min_value=min_date,
+            max_value=max_date,
+        )
 
         col3, col4 = st.columns(2)
-        start_time = col3.time_input("Heure de début", value=datetime.strptime("00:00", "%H:%M").time())
-        end_time = col4.time_input("Heure de fin", value=datetime.strptime("23:59", "%H:%M").time())
+        start_time = col3.time_input(
+            "Heure de début",
+            value=st.session_state.pilotage92_filters["start_time"],
+        )
+        end_time = col4.time_input(
+            "Heure de fin",
+            value=st.session_state.pilotage92_filters["end_time"],
+        )
 
-        _apply_filters_button = st.form_submit_button("Appliquer")
+        apply_filters_button = st.form_submit_button("Appliquer")
         reset_button = st.form_submit_button("Réinitialiser")
 
     if reset_button:
-        st.session_state.pilotage92_start = min_date
-        st.session_state.pilotage92_end = max_date
-        start_date, end_date = min_date, max_date
-        start_time = datetime.strptime("00:00", "%H:%M").time()
-        end_time = datetime.strptime("23:59", "%H:%M").time()
+        st.session_state.pilotage92_filters = {
+            "start_date": min_date,
+            "end_date": max_date,
+            "start_time": datetime.strptime("00:00", "%H:%M").time(),
+            "end_time": datetime.strptime("23:59", "%H:%M").time(),
+        }
+        st.experimental_rerun()
+
+    if apply_filters_button:
+        st.session_state.pilotage92_filters = {
+            "start_date": start_date,
+            "end_date": end_date,
+            "start_time": start_time,
+            "end_time": end_time,
+        }
+
+    start_date = st.session_state.pilotage92_filters["start_date"]
+    end_date = st.session_state.pilotage92_filters["end_date"]
+    start_time = st.session_state.pilotage92_filters["start_time"]
+    end_time = st.session_state.pilotage92_filters["end_time"]
 
     st.session_state.pilotage92_start = start_date
     st.session_state.pilotage92_end = end_date
