@@ -36,6 +36,32 @@
       backdrop-filter: blur(8px);
       z-index: 10;
     }
+    nav.tabs {
+      display: flex;
+      gap: 0.75rem;
+      padding: 0 2rem 1rem;
+      border-bottom: 1px solid var(--border);
+      background: rgba(15, 23, 42, 0.85);
+      position: sticky;
+      top: 78px;
+      z-index: 9;
+      backdrop-filter: blur(8px);
+    }
+    .tab-button {
+      padding: 0.65rem 1.1rem;
+      border-radius: 10px;
+      background: #0b1221;
+      border: 1px solid var(--border);
+      color: var(--text);
+      font-weight: 700;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    .tab-button.active {
+      background: var(--accent);
+      color: #06240d;
+      border-color: var(--accent);
+    }
     .brand { display: flex; align-items: center; gap: 1rem; }
     h1 { margin: 0 0 0.3rem; font-size: 1.8rem; }
     p.subtitle { margin: 0; color: var(--muted); }
@@ -124,6 +150,8 @@
       border-top: 1px solid var(--border);
     }
     .stats-row.stats-charts { padding-top: 1.25rem; }
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
     @media (max-width: 820px) { .brand { flex-direction: column; align-items: flex-start; } }
     @media (max-width: 780px) { .kpi-grid { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); } }
     @media (max-width: 680px) { header { position: static; } }
@@ -139,8 +167,13 @@
     </div>
   </header>
 
+  <nav class="tabs">
+    <button class="tab-button active" data-tab-target="pilotage">Pilotage</button>
+    <button class="tab-button" data-tab-target="import">Import</button>
+  </nav>
+
   <main>
-    <section>
+    <section class="tab-content" data-tab="import">
       <h2>1) Importer les CSV</h2>
       <div class="grid">
         <label class="dropzone">
@@ -156,9 +189,13 @@
         </div>
       </div>
       <p id="file-summary" class="muted" style="margin-top:0.5rem">Aucun fichier chargé.</p>
+      <div id="imports-panel" style="margin-top:1rem" class="chip">
+        <h3 style="margin-top:0;">Imports précédents</h3>
+        <div id="import-list" class="muted">Aucun import enregistré.</div>
+      </div>
     </section>
 
-    <section>
+    <section class="tab-content" data-tab="pilotage">
       <h2>2) Filtres</h2>
       <div class="filters-grid">
         <div class="chip">
@@ -199,12 +236,12 @@
       </div>
     </section>
 
-    <section>
+    <section class="tab-content" data-tab="pilotage">
       <h2>3) Indicateurs clés</h2>
       <div class="kpi-grid" id="kpi-container"></div>
     </section>
 
-    <section>
+    <section class="tab-content" data-tab="pilotage">
       <h2>4) Statistiques</h2>
       <div class="stats-row">
         <div>
@@ -228,7 +265,7 @@
       </div>
     </section>
 
-    <section>
+    <section class="tab-content" data-tab="pilotage">
       <h2>5) Données</h2>
       <div class="actions" style="margin-bottom:0.5rem">
         <button id="export-btn" type="button">Exporter la sélection (CSV)</button>
@@ -248,11 +285,14 @@
     const endDateInput = document.getElementById('end-date');
     const startHourInput = document.getElementById('start-hour');
     const endHourInput = document.getElementById('end-hour');
+    const tabButtons = document.querySelectorAll('.tab-button');
+    const tabSections = document.querySelectorAll('.tab-content');
     const kpiContainer = document.getElementById('kpi-container');
     const standardStats = document.getElementById('standard-stats');
     const queueStats = document.getElementById('queue-stats');
     const dataTable = document.getElementById('data-table');
     const saveStatus = document.getElementById('save-status');
+    const importList = document.getElementById('import-list');
 
     const TRACKED_EXTENSIONS = [
       { ext: '100', name: 'Abder Amazit' },
@@ -328,6 +368,7 @@
     let callAggregates = [];
     let extensionAggregates = { standard: [], medecin: [], queue: [], other: [] };
     let charts = {};
+    let importLog = [];
 
     const DB_NAME = 'appels3cx-db';
     const DB_VERSION = 1;
@@ -337,6 +378,7 @@
     document.getElementById('apply-filters').addEventListener('click', applyFilters);
     document.getElementById('export-btn').addEventListener('click', exportFiltered);
     document.getElementById('clear-local').addEventListener('click', clearIndexedDB);
+    tabButtons.forEach((btn) => btn.addEventListener('click', () => switchTab(btn.dataset.tabTarget)));
 
     const dropzone = document.querySelector('.dropzone');
     dropzone.addEventListener('click', () => fileInput.click());
@@ -437,16 +479,28 @@
       queueStats.innerHTML = '';
       fileSummary.textContent = 'Sauvegarde supprimée.';
       saveStatus.textContent = 'Aucune sauvegarde locale pour le moment.';
+      importLog = [];
+      localStorage.removeItem('import-log');
+      renderImportList();
     }
 
     function handleFiles(files) {
       if (!files || !files.length) return;
-      const parsePromises = Array.from(files).map(parseFile);
+      const imports = Array.from(files).map((file) =>
+        parseFile(file)
+          .then((rows) => ({ rows, fileName: file.name }))
+          .catch((err) => {
+            console.error(err);
+            return { rows: [], fileName: file.name, error: true };
+          }),
+      );
 
-      Promise.all(parsePromises)
-        .then(async (dataArrays) => {
-          const merged = dataArrays.flat();
-          await ingestRows(merged, `${files.length} fichier(s) chargé(s)`);
+      Promise.all(imports)
+        .then(async (items) => {
+          for (const item of items) {
+            if (item.error) continue;
+            await ingestRows(item.rows, item.fileName);
+          }
         })
         .catch((err) => {
           console.error(err);
@@ -454,18 +508,24 @@
         });
     }
 
-    async function ingestRows(rows, summaryLabel) {
+    async function ingestRows(rows, fileName) {
       if (!rows || !rows.length) {
-        fileSummary.textContent = `${summaryLabel} – aucune ligne détectée.`;
+        fileSummary.textContent = `${fileName} – aucune ligne détectée.`;
         return;
       }
-      const merged = rawData.concat(rows);
+      const importId = crypto.randomUUID ? crypto.randomUUID() : `imp_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+      const importedAt = new Date().toISOString();
+      const taggedRows = rows.map((row) => ({ ...row, __importId: importId, __fileName: fileName, __importedAt: importedAt }));
+
+      const merged = rawData.concat(taggedRows);
       const { rows: cleaned, duplicates } = buildDataset(merged);
       rawData = cleaned;
       const duplicateNote = duplicates
         ? ` (${duplicates} doublon(s) ignoré(s) sur ${merged.length} lignes chargées)`
         : '';
-      fileSummary.textContent = `${summaryLabel} – ${rawData.length} lignes après nettoyage${duplicateNote}.`;
+      fileSummary.textContent = `${fileName} – ${rawData.length} lignes après nettoyage${duplicateNote}.`;
+      const importRows = rawData.filter((row) => row.ImportId === importId);
+      addImportEntry(importId, fileName, importedAt, importRows);
       await persistDataset(rawData);
       populateFilters(rawData);
       applyFilters();
@@ -690,6 +750,9 @@
           Week: callTime ? isoWeek(callTime) : '',
           DayOfWeek: callTime ? callTime.toLocaleDateString('fr-FR', { weekday: 'long' }) : '',
           Hour: callTime ? callTime.getHours() : '',
+          ImportId: row.__importId || '',
+          ImportFileName: row.__fileName || '',
+          ImportedAt: row.__importedAt || '',
         };
         record.CallType = categorizeCall(record.DirectionClean, record.To, record['Call Activity Details']);
 
@@ -1144,6 +1207,105 @@
       });
     }
 
+    function switchTab(target) {
+      tabButtons.forEach((btn) => btn.classList.toggle('active', btn.dataset.tabTarget === target));
+      tabSections.forEach((section) => section.classList.toggle('active', section.dataset.tab === target));
+    }
+
+    function loadImportLog() {
+      const stored = localStorage.getItem('import-log');
+      if (!stored) return [];
+      try {
+        return JSON.parse(stored);
+      } catch (e) {
+        console.error("Impossible de lire l'historique des imports", e);
+        return [];
+      }
+    }
+
+    function saveImportLog() {
+      localStorage.setItem('import-log', JSON.stringify(importLog));
+    }
+
+    function formatDate(value) {
+      if (!value) return '';
+      const date = new Date(value);
+      return date instanceof Date && !Number.isNaN(date) ? date.toLocaleString('fr-FR') : '';
+    }
+
+    function addImportEntry(importId, fileName, importedAt, rows) {
+      if (!rows.length) return;
+      const dates = rows
+        .map((row) => row.CallTime instanceof Date ? row.CallTime : row.CallTime ? new Date(row.CallTime) : row.Date ? new Date(row.Date) : null)
+        .filter((d) => d instanceof Date && !Number.isNaN(d));
+      const start = dates.length ? new Date(Math.min(...dates)) : null;
+      const end = dates.length ? new Date(Math.max(...dates)) : null;
+      importLog.push({
+        id: importId,
+        fileName,
+        importedAt,
+        startDate: start ? start.toISOString() : '',
+        endDate: end ? end.toISOString() : '',
+        rows: rows.length,
+      });
+      saveImportLog();
+      renderImportList();
+    }
+
+    function renderImportList() {
+      if (!importLog.length) {
+        importList.textContent = 'Aucun import enregistré.';
+        return;
+      }
+      const rows = importLog
+        .map(
+          (entry) => `
+            <tr>
+              <td>${entry.fileName}</td>
+              <td>${formatDate(entry.importedAt)}</td>
+              <td>${entry.startDate ? formatDate(entry.startDate) : 'N/A'}</td>
+              <td>${entry.endDate ? formatDate(entry.endDate) : 'N/A'}</td>
+              <td>${entry.rows}</td>
+              <td style="text-align:center"><button data-delete-import="${entry.id}" aria-label="Supprimer l'import" style="width:auto;padding:0.35rem 0.55rem;">✕</button></td>
+            </tr>
+          `,
+        )
+        .join('');
+
+      importList.innerHTML = `
+        <table>
+          <thead>
+            <tr>
+              <th>Fichier</th>
+              <th>Date d'import</th>
+              <th>Période minimale</th>
+              <th>Période maximale</th>
+              <th>Lignes gardées</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      `;
+
+      importList.querySelectorAll('[data-delete-import]').forEach((btn) => {
+        btn.addEventListener('click', () => removeImport(btn.dataset.deleteImport));
+      });
+    }
+
+    async function removeImport(importId) {
+      importLog = importLog.filter((entry) => entry.id !== importId);
+      rawData = rawData.filter((row) => row.ImportId !== importId);
+      await persistDataset(rawData);
+      saveImportLog();
+      renderImportList();
+      populateFilters(rawData);
+      applyFilters();
+      fileSummary.textContent = rawData.length
+        ? `${rawData.length} lignes restantes après suppression.`
+        : 'Aucun fichier chargé.';
+    }
+
     function exportFiltered() {
       const dataset = filteredData;
       if (!dataset.length) return alert('Aucune donnée filtrée à exporter.');
@@ -1160,6 +1322,9 @@
       URL.revokeObjectURL(url);
     }
 
+    importLog = loadImportLog();
+    renderImportList();
+    switchTab('pilotage');
     restoreFromIndexedDB();
   </script>
 </body>
