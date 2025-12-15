@@ -980,14 +980,17 @@
     function renderKPIs() {
       const total = callAggregates.length;
       const answered = callAggregates.filter((c) => c.answered).length;
-      const failures = callAggregates.filter((c) => !c.answered && c.failures).length;
+      const queueAbandoned = (extensionAggregates.queue || []).reduce(
+        (sum, entry) => sum + (entry.failures || 0),
+        0,
+      );
       const totalTalk = callAggregates.reduce((sum, c) => sum + (Number(c.talking) || 0), 0);
       const avgTalk = total ? totalTalk / total : 0;
 
       const kpis = [
         { label: 'Appels totaux (Call ID)', value: total },
         { label: 'Répondus', value: answered },
-        { label: "Échecs d'appel", value: failures },
+        { label: 'Appels abandonnés', value: queueAbandoned },
         { label: 'Durée moyenne de conversation (s)', value: avgTalk.toFixed(1) },
       ];
 
