@@ -988,7 +988,7 @@
       const avgTalk = total ? totalTalk / total : 0;
 
       const kpis = [
-        { label: 'Appels totaux (Call ID)', value: total },
+        { label: 'Appels totaux', value: total },
         { label: 'Répondus', value: answered },
         { label: 'Appels abandonnés', value: queueAbandoned },
         { label: 'Durée moyenne de conversation (s)', value: avgTalk.toFixed(1) },
@@ -1024,7 +1024,7 @@
           <thead>
             <tr>
               <th>Extension</th>
-              <th>Appels (Call ID uniques)</th>
+              <th>Appels</th>
               ${directionHeaders}
               <th>${answeredLabel}</th>
               <th>${failureLabel}</th>
