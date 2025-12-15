@@ -182,10 +182,15 @@
     <section>
       <h2>4) Statistiques</h2>
       <p class="muted">Les volumes sont consolidés au niveau <strong>Call ID</strong> pour éviter les doubles comptages des appels multi-lignes.</p>
+      <p class="muted">Lecture directionnelle : en sortie l’extension est l’émetteur (<strong>From</strong>), en entrée c’est le destinataire (<strong>To</strong>). Les extensions sont ensuite classées strictement : 100–130 (Standard), 132–345 (Médecins), ≥ 800 (Files), le reste en “Autre / Inconnu”.</p>
       <div class="stats-row">
         <div>
           <h3>Bloc Standard</h3>
           <div id="standard-stats"></div>
+        </div>
+        <div>
+          <h3>Bloc Médecins</h3>
+          <div id="medecin-stats"></div>
         </div>
         <div>
           <h3>Bloc Files d'attente</h3>
@@ -226,6 +231,7 @@
     const endHourInput = document.getElementById('end-hour');
     const kpiContainer = document.getElementById('kpi-container');
     const standardStats = document.getElementById('standard-stats');
+    const medecinStats = document.getElementById('medecin-stats');
     const queueStats = document.getElementById('queue-stats');
     const dataTable = document.getElementById('data-table');
     const saveStatus = document.getElementById('save-status');
@@ -300,6 +306,7 @@
 
     let rawData = [];
     let filteredData = [];
+    let eligibleData = [];
     let callAggregates = [];
     let extensionAggregates = { standard: [], medecin: [], queue: [], other: [] };
     let charts = {};
@@ -629,9 +636,10 @@
         const extensionCategory = classifyExtension(extension);
         const isInbound = (direction || '').toLowerCase().includes('inbound');
         const isOutbound = (direction || '').toLowerCase().includes('outbound');
-        const standardEligible =
-          extensionCategory === 'standard' &&
-          ((isInbound && agent.source === 'to') || (isOutbound && agent.source === 'from') || (!isInbound && !isOutbound && !!extension));
+        const directionAligned =
+          (isOutbound && agent.source === 'from') ||
+          (isInbound && agent.source === 'to') ||
+          (!isInbound && !isOutbound && !!extension);
         const record = {
           'Call ID': callId,
           'Call Time': callTimeRaw,
@@ -647,7 +655,7 @@
           AgentExt: extension,
           AgentTracked: Boolean(extension && trackedExtensionMap.has(extension)),
           ExtensionCategory: extensionCategory,
-          StandardEligible: standardEligible,
+          AgentDirectionMatch: directionAligned,
           QueueNumber: queueInfo?.number || '',
           QueueLabel: queueInfo?.label || '',
           QueueGroup: queueInfo?.group || queueInfo?.label || '',
@@ -798,13 +806,14 @@
         return agentMatch && queueMatch && dateOk && hourOk && dirOk && statusOk;
       });
 
-      const standardRows = filteredData.filter((row) => row.StandardEligible);
+      eligibleData = filteredData.filter((row) => row.AgentDirectionMatch);
 
-      callAggregates = aggregateCalls(standardRows);
-      extensionAggregates = aggregateExtensions(standardRows);
+      callAggregates = aggregateCalls(eligibleData);
+      extensionAggregates = aggregateExtensions(eligibleData);
 
       renderKPIs();
       renderCategoryTable(standardStats, extensionAggregates.standard || []);
+      renderCategoryTable(medecinStats, extensionAggregates.medecin || []);
       renderCategoryTable(queueStats, extensionAggregates.queue || []);
       renderDataTable();
       renderCharts();
@@ -856,8 +865,12 @@
     }
 
     function aggregateExtensions(rows) {
-      const perCallAgent = new Map();
-      const perCallQueue = new Map();
+      const perCallCategory = {
+        standard: new Map(),
+        medecin: new Map(),
+        queue: new Map(),
+        other: new Map(),
+      };
 
       rows.forEach((row, index) => {
         const callId = row['Call ID'] || `__missing_${index}`;
@@ -866,40 +879,29 @@
         const isFailure = ['no answer', 'missed', 'unanswered', 'busy', 'failed'].includes(status);
 
         const ext = row.AgentExt || '';
-        const label = row.AgentLabel || row.AgentName || ext || 'Autre / Inconnu';
-        if (ext) {
-          const agentKey = `${callId}|${ext}`;
-          const current = perCallAgent.get(agentKey) || {
-            label,
-            ext,
-            calls: 0,
-            answered: 0,
-            failures: 0,
-            talking: 0,
-          };
-          current.calls = 1;
-          current.answered = current.answered || isAnswered ? 1 : 0;
-          current.failures = current.answered ? 0 : current.failures || isFailure ? 1 : 0;
-          current.talking += Number(row.TalkingSeconds) || 0;
-          perCallAgent.set(agentKey, current);
-        }
+        const category = perCallCategory[row.ExtensionCategory] ? row.ExtensionCategory : 'other';
+        const baseLabel =
+          category === 'queue'
+            ? row.QueueLabel || row.QueueNumber || row.AgentLabel || row.AgentName || ext || 'File inconnue'
+            : row.AgentLabel || row.AgentName || ext || 'Autre / Inconnu';
+        const keyLabel = baseLabel || 'Autre / Inconnu';
+        const bucket = perCallCategory[category] || perCallCategory.other;
+        const entryKey = `${callId}|${ext || keyLabel}`;
 
-        if (row.QueueNumber && row.QueueNumber !== '992') {
-          const queueKey = `${callId}|${row.QueueNumber}`;
-          const queueCurrent = perCallQueue.get(queueKey) || {
-            label: row.QueueLabel || row.QueueNumber,
-            ext: row.QueueNumber,
-            calls: 0,
-            answered: 0,
-            failures: 0,
-            talking: 0,
-          };
-          queueCurrent.calls = 1;
-          queueCurrent.answered = queueCurrent.answered || isAnswered ? 1 : 0;
-          queueCurrent.failures = queueCurrent.answered ? 0 : queueCurrent.failures || isFailure ? 1 : 0;
-          queueCurrent.talking += Number(row.TalkingSeconds) || 0;
-          perCallQueue.set(queueKey, queueCurrent);
-        }
+        const current = bucket.get(entryKey) || {
+          label: keyLabel,
+          ext: ext || keyLabel,
+          calls: 0,
+          answered: 0,
+          failures: 0,
+          talking: 0,
+        };
+
+        current.calls = 1;
+        current.answered = current.answered || isAnswered ? 1 : 0;
+        current.failures = current.answered ? 0 : current.failures || isFailure ? 1 : 0;
+        current.talking += Number(row.TalkingSeconds) || 0;
+        bucket.set(entryKey, current);
       });
 
       const aggregateBucket = (map) => {
@@ -924,8 +926,10 @@
       };
 
       return {
-        standard: aggregateBucket(perCallAgent),
-        queue: aggregateBucket(perCallQueue),
+        standard: aggregateBucket(perCallCategory.standard),
+        medecin: aggregateBucket(perCallCategory.medecin),
+        queue: aggregateBucket(perCallCategory.queue),
+        other: aggregateBucket(perCallCategory.other),
       };
     }
 
@@ -990,7 +994,8 @@
     }
 
     function renderDataTable() {
-      if (!filteredData.length) {
+      const dataset = eligibleData.length ? eligibleData : filteredData;
+      if (!dataset.length) {
         dataTable.innerHTML = '<p class="muted">Aucune donnée à afficher.</p>';
         return;
       }
@@ -1019,7 +1024,7 @@
             <tr>${headers.map((h) => `<th>${h}</th>`).join('')}</tr>
           </thead>
           <tbody>
-            ${filteredData
+            ${dataset
               .slice(0, 400)
               .map(
                 (row) => `
@@ -1032,7 +1037,7 @@
               .join('')}
           </tbody>
         </table>
-        <p class="muted">${filteredData.length > 400 ? 'Affichage limité aux 400 premières lignes pour garder de bonnes performances.' : ''}</p>`;
+        <p class="muted">${dataset.length > 400 ? 'Affichage limité aux 400 premières lignes pour garder de bonnes performances.' : ''}</p>`;
       dataTable.innerHTML = html;
     }
 
@@ -1068,10 +1073,11 @@
     }
 
     function exportFiltered() {
-      if (!filteredData.length) return alert('Aucune donnée filtrée à exporter.');
-      const headers = Object.keys(filteredData[0]);
+      const dataset = eligibleData.length ? eligibleData : filteredData;
+      if (!dataset.length) return alert('Aucune donnée filtrée à exporter.');
+      const headers = Object.keys(dataset[0]);
       const csv = [headers.join(',')].concat(
-        filteredData.map((row) => headers.map((h) => JSON.stringify(row[h] ?? '')).join(',')),
+        dataset.map((row) => headers.map((h) => JSON.stringify(row[h] ?? '')).join(',')),
       );
       const blob = new Blob([csv.join('\n')], { type: 'text/csv;charset=utf-8;' });
       const url = URL.createObjectURL(blob);
