@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 140" role="img" aria-labelledby="title desc">
+  <title id="title">SOS92 - Garde et urgences médicales</title>
+  <desc id="desc">Logo pour SOS92 avec un pictogramme de stéthoscope et le sous-titre Garde et urgences médicales.</desc>
+  <defs>
+    <linearGradient id="tealGradient" x1="0%" x2="100%" y1="0%" y2="0%">
+      <stop offset="0%" stop-color="#00b6c7" />
+      <stop offset="100%" stop-color="#22c1b8" />
+    </linearGradient>
+  </defs>
+  <g transform="translate(10 18)">
+    <g transform="translate(0 6)">
+      <circle cx="48" cy="48" r="42" fill="none" stroke="#1d2a5c" stroke-width="7" />
+      <path d="M24 24c0 11 6 20 14 20h0c8 0 14-9 14-20" fill="none" stroke="#1d2a5c" stroke-width="7" stroke-linecap="round" />
+      <path d="M38 44v20c0 12 7 20 19 20 9 0 14-7 14-14v-9" fill="none" stroke="#1d2a5c" stroke-width="7" stroke-linecap="round" />
+      <circle cx="86" cy="70" r="10" fill="none" stroke="url(#tealGradient)" stroke-width="6" />
+      <line x1="86" y1="80" x2="86" y2="94" stroke="#1d2a5c" stroke-width="7" stroke-linecap="round" />
+      <circle cx="86" cy="104" r="6" fill="#22c1b8" />
+    </g>
+    <g font-family="'Inter', 'Segoe UI', sans-serif" font-weight="800" font-size="54">
+      <text x="118" y="72" fill="#1d2a5c">SOS</text>
+      <text x="234" y="72" fill="url(#tealGradient)">92</text>
+    </g>
+    <text x="118" y="108" fill="#1d2a5c" font-family="'Inter', 'Segoe UI', sans-serif" font-size="16" font-weight="700" letter-spacing="0.6">
+      GARDE ET URGENCES MÉDICALES
+    </text>
+  </g>
+</svg>
