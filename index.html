@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Analyse locale des appels 3CX</title>
+  <title>Analyse des appels 3CX</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet" />
@@ -161,7 +161,7 @@
   <header>
     <div class="brand">
       <div>
-        <h1>Analyse locale des appels 3CX</h1>
+        <h1>Analyse des appels 3CX</h1>
         <p class="subtitle">Chargez vos fichiers CSV, analysez hors-ligne, exportez et sauvegardez vos données directement dans le navigateur.</p>
       </div>
     </div>
@@ -207,7 +207,7 @@
           <select id="status-select" multiple size="4"></select>
         </div>
         <div class="chip">
-          <label for="agent-select">Utilisateurs (agents / extensions)</label>
+          <label for="agent-select">Utilisateurs</label>
           <select id="agent-select" multiple size="6"></select>
         </div>
         <div class="chip">
@@ -245,11 +245,11 @@
       <h2>Statistiques</h2>
       <div class="stats-row">
         <div>
-          <h3>Bloc Standard</h3>
+          <h3>Standard</h3>
           <div id="standard-stats"></div>
         </div>
         <div>
-          <h3>Bloc Files d'attente</h3>
+          <h3>Files d'attente</h3>
           <div id="queue-stats"></div>
         </div>
       </div>
@@ -796,7 +796,9 @@
     function populateFilters(data) {
       const directions = Array.from(new Set(
         data.map((d) => (d.DirectionClean || '').toLowerCase()).filter(Boolean),
-      )).sort();
+      ))
+        .filter((dir) => dir !== 'inbound queue')
+        .sort();
       const statuses = Array.from(new Set(
         data.map((d) => (d.StatusClean || '').toLowerCase()).filter(Boolean),
       )).sort();
@@ -850,7 +852,7 @@
       if (!startHourInput.value) startHourInput.value = 0;
       if (!endHourInput.value) endHourInput.value = 23;
 
-      saveStatus.textContent = 'Données chargées ; sauvegarde automatique activée.';
+      saveStatus.textContent = '';
     }
 
     function applyFilters() {
