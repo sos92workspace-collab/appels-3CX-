@@ -813,8 +813,13 @@
       extensionAggregates = aggregateExtensions(eligibleData);
 
       renderKPIs();
-      renderCategoryTable(standardStats, extensionAggregates.standard || []);
-      renderCategoryTable(queueStats, extensionAggregates.queue || []);
+      renderCategoryTable(standardStats, extensionAggregates.standard || [], {
+        answeredLabel: 'Appels réussis',
+        showDirectionBreakdown: true,
+      });
+      renderCategoryTable(queueStats, extensionAggregates.queue || [], {
+        failureLabel: 'Appels perdus',
+      });
       renderDataTable();
       renderCharts();
     }
@@ -877,6 +882,9 @@
         const status = (row.StatusClean || '').toLowerCase();
         const isAnswered = status === 'answered';
         const isFailure = ['no answer', 'missed', 'unanswered', 'busy', 'failed'].includes(status);
+        const direction = (row.DirectionClean || '').toLowerCase();
+        const isInbound = direction.includes('inbound');
+        const isOutbound = direction.includes('outbound');
 
         const ext = row.AgentExt || '';
         const category = perCallCategory[row.ExtensionCategory] ? row.ExtensionCategory : 'other';
@@ -894,12 +902,16 @@
           calls: 0,
           answered: 0,
           failures: 0,
+          inbound: 0,
+          outbound: 0,
           talking: 0,
         };
 
         current.calls = 1;
         current.answered = current.answered || isAnswered ? 1 : 0;
         current.failures = current.answered ? 0 : current.failures || isFailure ? 1 : 0;
+        current.inbound = isInbound ? 1 : 0;
+        current.outbound = isOutbound ? 1 : 0;
         current.talking += Number(row.TalkingSeconds) || 0;
         bucket.set(entryKey, current);
       });
@@ -914,11 +926,15 @@
             calls: 0,
             answered: 0,
             failures: 0,
+            inbound: 0,
+            outbound: 0,
             talking: 0,
           };
           current.calls += entry.calls;
           current.answered += entry.answered;
           current.failures += entry.failures;
+          current.inbound += entry.inbound;
+          current.outbound += entry.outbound;
           current.talking += entry.talking;
           grouped.set(key, current);
         });
@@ -958,11 +974,19 @@
         .join('');
     }
 
-    function renderCategoryTable(container, rows) {
+    function renderCategoryTable(
+      container,
+      rows,
+      { answeredLabel = 'Répondus', failureLabel = "Échecs d'appel", showDirectionBreakdown = false } = {},
+    ) {
       if (!rows.length) {
         container.innerHTML = '<p class="muted">Aucune donnée à afficher.</p>';
         return;
       }
+
+      const directionHeaders = showDirectionBreakdown
+        ? '<th>Nombre entrants</th><th>Nombre sortants</th>'
+        : '';
 
       const html = `
         <table>
@@ -970,8 +994,9 @@
             <tr>
               <th>Extension</th>
               <th>Appels (Call ID uniques)</th>
-              <th>Répondus</th>
-              <th>Échecs d'appel</th>
+              ${directionHeaders}
+              <th>${answeredLabel}</th>
+              <th>${failureLabel}</th>
               <th>Temps de parole moyen (s)</th>
             </tr>
           </thead>
@@ -982,6 +1007,7 @@
                   <tr>
                     <td>${r.label}${r.ext ? ` (${r.ext})` : ''}</td>
                     <td>${r.calls}</td>
+                    ${showDirectionBreakdown ? `<td>${r.inbound || 0}</td><td>${r.outbound || 0}</td>` : ''}
                     <td><span class="badge success">${r.answered}</span></td>
                     <td><span class="badge warn">${r.failures}</span></td>
                     <td>${(r.talking / r.calls || 0).toFixed(1)}</td>
