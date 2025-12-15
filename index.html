@@ -43,6 +43,12 @@
     h2 { margin-top: 0; }
     .grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
     .controls { display: flex; gap: 0.75rem; flex-wrap: wrap; }
+    .filters-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(220px, 1fr));
+      gap: 0.75rem;
+    }
+    .filters-grid + .filters-grid { margin-top: 0.75rem; }
     .chip {
       background: #0b1221;
       border: 1px solid var(--border);
@@ -92,7 +98,11 @@
       border-color: var(--accent);
       background: rgba(34, 197, 94, 0.05);
     }
-    .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0.8rem; }
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(220px, 1fr));
+      gap: 0.9rem;
+    }
     .kpi { padding: 0.8rem; border-radius: 10px; border: 1px solid var(--border); background: #0b1221; }
     .kpi .label { color: var(--muted); font-size: 0.9rem; }
     .kpi .value { font-size: 1.4rem; font-weight: 700; margin-top: 0.2rem; }
@@ -107,6 +117,15 @@
     .actions { display: flex; gap: 0.75rem; flex-wrap: wrap; }
     .chart-wrapper { position: relative; height: 260px; }
     .stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1rem; }
+    .stats-row + .stats-row {
+      margin-top: 1.5rem;
+      padding-top: 1rem;
+      border-top: 1px solid var(--border);
+    }
+    .stats-row.stats-charts { padding-top: 1.25rem; }
+    @media (max-width: 1100px) { .filters-grid { grid-template-columns: repeat(2, minmax(220px, 1fr)); } }
+    @media (max-width: 780px) { .filters-grid { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); } }
+    @media (max-width: 780px) { .kpi-grid { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); } }
     @media (max-width: 680px) { header { position: static; } }
   </style>
 </head>
@@ -137,7 +156,7 @@
 
     <section>
       <h2>2) Filtres</h2>
-      <div class="controls">
+      <div class="filters-grid">
         <div class="chip">
           <label for="direction-select">Direction</label>
           <select id="direction-select" multiple size="4"></select>
@@ -154,6 +173,8 @@
           <label for="queue-select">Files d'attente</label>
           <select id="queue-select" multiple size="6"></select>
         </div>
+      </div>
+      <div class="filters-grid">
         <div class="chip">
           <label>Période</label>
           <div class="controls" style="padding:0; gap:0.35rem; flex-wrap:nowrap;">
@@ -193,7 +214,7 @@
           <div id="queue-stats"></div>
         </div>
       </div>
-      <div class="stats-row">
+      <div class="stats-row stats-charts">
         <div>
           <h3>Répartition des appels par jour</h3>
           <div class="chart-wrapper"><canvas id="date-chart"></canvas></div>
@@ -1020,7 +1041,22 @@
     }
 
     function renderDataTable() {
-      const dataset = filteredData;
+      const seen = new Set();
+      const dataset = filteredData
+        .filter((row, index) => {
+          const key = `${row['Call ID'] || '__missing'}|${row.CallTime || row.Date || index}`;
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        })
+        .sort((a, b) => {
+          const parseDate = (value) => {
+            const date = value ? new Date(value) : null;
+            return date instanceof Date && !Number.isNaN(date) ? date.getTime() : -Infinity;
+          };
+          return parseDate(b.CallTime ?? b.Date) - parseDate(a.CallTime ?? a.Date);
+        });
+
       if (!dataset.length) {
         dataTable.innerHTML = '<p class="muted">Aucune donnée à afficher.</p>';
         return;
