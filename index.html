@@ -189,10 +189,6 @@
           <div id="standard-stats"></div>
         </div>
         <div>
-          <h3>Bloc Médecins</h3>
-          <div id="medecin-stats"></div>
-        </div>
-        <div>
           <h3>Bloc Files d'attente</h3>
           <div id="queue-stats"></div>
         </div>
@@ -231,7 +227,6 @@
     const endHourInput = document.getElementById('end-hour');
     const kpiContainer = document.getElementById('kpi-container');
     const standardStats = document.getElementById('standard-stats');
-    const medecinStats = document.getElementById('medecin-stats');
     const queueStats = document.getElementById('queue-stats');
     const dataTable = document.getElementById('data-table');
     const saveStatus = document.getElementById('save-status');
@@ -806,6 +801,12 @@
         return agentMatch && queueMatch && dateOk && hourOk && dirOk && statusOk;
       });
 
+      filteredData = filteredData.filter((row) => {
+        const queueNumber = (row.QueueNumber || '').toString();
+        const agentExtension = (row.AgentExt || '').toString();
+        return queueNumber !== '992' && agentExtension !== '992';
+      });
+
       eligibleData = filteredData.filter((row) => row.AgentDirectionMatch);
 
       callAggregates = aggregateCalls(eligibleData);
@@ -813,7 +814,6 @@
 
       renderKPIs();
       renderCategoryTable(standardStats, extensionAggregates.standard || []);
-      renderCategoryTable(medecinStats, extensionAggregates.medecin || []);
       renderCategoryTable(queueStats, extensionAggregates.queue || []);
       renderDataTable();
       renderCharts();
@@ -994,7 +994,7 @@
     }
 
     function renderDataTable() {
-      const dataset = eligibleData.length ? eligibleData : filteredData;
+      const dataset = filteredData;
       if (!dataset.length) {
         dataTable.innerHTML = '<p class="muted">Aucune donnée à afficher.</p>';
         return;
@@ -1073,7 +1073,7 @@
     }
 
     function exportFiltered() {
-      const dataset = eligibleData.length ? eligibleData : filteredData;
+      const dataset = filteredData;
       if (!dataset.length) return alert('Aucune donnée filtrée à exporter.');
       const headers = Object.keys(dataset[0]);
       const csv = [headers.join(',')].concat(
