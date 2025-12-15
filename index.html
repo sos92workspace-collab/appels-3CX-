@@ -187,10 +187,23 @@
 
     <section>
       <h2>4) Statistiques</h2>
+      <p class="muted">Les volumes sont consolidés au niveau <strong>Call ID</strong> pour éviter les doubles comptages des appels multi-lignes.</p>
       <div class="grid">
         <div>
-          <h3>Par agent</h3>
-          <div id="agent-stats"></div>
+          <h3>Bloc 1 : Agents du standard (100–130)</h3>
+          <div id="standard-stats"></div>
+        </div>
+        <div>
+          <h3>Bloc 2 : Médecins (132–345)</h3>
+          <div id="medecin-stats"></div>
+        </div>
+        <div>
+          <h3>Bloc 3 : Files d'attente (≥ 800)</h3>
+          <div id="queue-stats"></div>
+        </div>
+        <div>
+          <h3>Autre / Inconnu</h3>
+          <div id="other-stats"></div>
         </div>
         <div>
           <h3>Répartition temporelle</h3>
@@ -222,7 +235,10 @@
     const startHourInput = document.getElementById('start-hour');
     const endHourInput = document.getElementById('end-hour');
     const kpiContainer = document.getElementById('kpi-container');
-    const agentStats = document.getElementById('agent-stats');
+    const standardStats = document.getElementById('standard-stats');
+    const medecinStats = document.getElementById('medecin-stats');
+    const queueStats = document.getElementById('queue-stats');
+    const otherStats = document.getElementById('other-stats');
     const dataTable = document.getElementById('data-table');
     const saveStatus = document.getElementById('save-status');
     const pasteInput = document.getElementById('paste-input');
@@ -276,6 +292,8 @@
 
     let rawData = [];
     let filteredData = [];
+    let callAggregates = [];
+    let extensionAggregates = { standard: [], medecin: [], queue: [], other: [] };
     let charts = {};
 
     const DB_NAME = 'appels3cx-db';
@@ -380,9 +398,14 @@
       });
       rawData = [];
       filteredData = [];
+      callAggregates = [];
+      extensionAggregates = { standard: [], medecin: [], queue: [], other: [] };
       dataTable.innerHTML = '';
       kpiContainer.innerHTML = '';
-      agentStats.innerHTML = '';
+      standardStats.innerHTML = '';
+      medecinStats.innerHTML = '';
+      queueStats.innerHTML = '';
+      otherStats.innerHTML = '';
       fileSummary.textContent = 'Sauvegarde supprimée.';
       saveStatus.textContent = 'Aucune sauvegarde locale pour le moment.';
     }
@@ -523,9 +546,15 @@
     const trackedExtensionNumbers = TRACKED_EXTENSIONS.map((entry) => entry.ext);
     const trackedQueueNumbers = TRACKED_QUEUES.map((entry) => entry.number);
 
-    function extractAgent(from, to) {
+    function extractAgent(direction, from, to) {
       const regex = /([^()]+?)\s*\((\d{2,})\)/;
-      const candidates = [from, to];
+      const dir = (direction || '').toLowerCase();
+      const candidates = dir.includes('outbound')
+        ? [from, to]
+        : dir.includes('inbound')
+          ? [to, from]
+          : [from, to];
+
       for (const candidate of candidates) {
         const match = regex.exec(candidate || '');
         if (match) {
@@ -555,6 +584,14 @@
         }
       }
       return null;
+    }
+
+    function classifyExtension(ext) {
+      const value = Number(ext);
+      if (Number.isFinite(value) && value >= 100 && value <= 130) return 'standard';
+      if (Number.isFinite(value) && value >= 132 && value <= 345) return 'medecin';
+      if (Number.isFinite(value) && value >= 800) return 'queue';
+      return 'other';
     }
 
     function categorizeCall(direction, to, details) {
@@ -622,10 +659,16 @@
         const details = readField(normalized, ['Call Activity Details', 'Details']);
 
         const callTime = parseDateTime(callTimeRaw);
-        const agent = extractAgent(from, to);
+        const agent = extractAgent(direction, from, to);
         const queueInfo = findTrackedQueue(from, to, details);
-        const extension = agent.ext || findTrackedExtension(from, to);
+        const extFallbackFields = direction.toLowerCase().includes('outbound')
+          ? [from]
+          : direction.toLowerCase().includes('inbound')
+            ? [to]
+            : [from, to];
+        const extension = agent.ext || findTrackedExtension(...extFallbackFields);
         const agentName = agent.name || trackedExtensionMap.get(extension) || '';
+        const extensionCategory = classifyExtension(extension);
         const record = {
           'Call ID': callId,
           'Call Time': callTimeRaw,
@@ -640,6 +683,7 @@
             : agentName || agent.name,
           AgentExt: extension,
           AgentTracked: Boolean(extension && trackedExtensionMap.has(extension)),
+          ExtensionCategory: extensionCategory,
           QueueNumber: queueInfo?.number || '',
           QueueLabel: queueInfo?.label || '',
           QueueGroup: queueInfo?.group || queueInfo?.label || '',
@@ -792,8 +836,14 @@
         return agentMatch && queueMatch && dateOk && hourOk && dirOk && statusOk;
       });
 
+      callAggregates = aggregateCalls(filteredData);
+      extensionAggregates = aggregateExtensions(filteredData);
+
       renderKPIs();
-      renderAgentTable();
+      renderCategoryTable(standardStats, extensionAggregates.standard || []);
+      renderCategoryTable(medecinStats, extensionAggregates.medecin || []);
+      renderCategoryTable(queueStats, extensionAggregates.queue || []);
+      renderCategoryTable(otherStats, extensionAggregates.other || []);
       renderDataTable();
       renderCharts();
     }
@@ -803,17 +853,130 @@
       return values.includes('__all__') ? [] : values;
     }
 
+    function aggregateCalls(rows) {
+      const byCall = new Map();
+
+      rows.forEach((row, index) => {
+        const callId = row['Call ID'] || `__missing_${index}`;
+        const status = (row.StatusClean || '').toLowerCase();
+        const isAnswered = status === 'answered';
+        const callTime = row.CallTime instanceof Date ? row.CallTime : row.CallTime ? new Date(row.CallTime) : null;
+
+        const current = byCall.get(callId) || {
+          callId,
+          answered: false,
+          missed: false,
+          unanswered: false,
+          talking: 0,
+          ringing: 0,
+          callTime: null,
+          date: '',
+          hour: '',
+          dow: '',
+        };
+
+        current.answered = current.answered || isAnswered;
+        current.missed = current.missed || (!current.answered && ['no answer', 'missed'].includes(status));
+        current.unanswered = current.unanswered || (!current.answered && status === 'unanswered');
+        current.talking += Number(row.TalkingSeconds) || 0;
+        current.ringing += Number(row.RingingSeconds) || 0;
+
+        if (callTime && (!current.callTime || callTime < current.callTime)) {
+          current.callTime = callTime;
+          current.date = row.Date || callTime.toISOString().slice(0, 10);
+          current.hour = callTime.getHours();
+          current.dow = callTime.toLocaleDateString('fr-FR', { weekday: 'long' });
+        }
+
+        byCall.set(callId, current);
+      });
+
+      return Array.from(byCall.values()).map((entry) => ({
+        ...entry,
+        missed: entry.answered ? false : entry.missed || entry.unanswered,
+      }));
+    }
+
+    function aggregateExtensions(rows) {
+      const perCallExt = new Map();
+
+      rows.forEach((row, index) => {
+        const callId = row['Call ID'] || `__missing_${index}`;
+        const ext = row.AgentExt || '';
+        const label = row.AgentLabel || row.AgentName || ext || 'Autre / Inconnu';
+        const category = row.ExtensionCategory || classifyExtension(ext);
+        const key = `${callId}|${ext || label}|${category}`;
+        const status = (row.StatusClean || '').toLowerCase();
+        const isAnswered = status === 'answered';
+        const isMissed = ['no answer', 'missed', 'unanswered'].includes(status);
+
+        const current = perCallExt.get(key) || {
+          callId,
+          ext,
+          label,
+          category,
+          answered: false,
+          missed: false,
+          talking: 0,
+        };
+
+        current.answered = current.answered || isAnswered;
+        current.missed = current.missed || (!current.answered && isMissed);
+        current.talking += Number(row.TalkingSeconds) || 0;
+
+        perCallExt.set(key, current);
+      });
+
+      const buckets = { standard: [], medecin: [], queue: [], other: [] };
+
+      perCallExt.forEach((entry) => {
+        const target = buckets[entry.category] || buckets.other;
+        target.push({
+          label: entry.label,
+          ext: entry.ext,
+          calls: 1,
+          answered: entry.answered ? 1 : 0,
+          missed: entry.answered ? 0 : entry.missed ? 1 : 0,
+          talking: entry.talking,
+        });
+      });
+
+      const aggregated = {};
+      Object.entries(buckets).forEach(([category, entries]) => {
+        const grouped = new Map();
+        entries.forEach((entry) => {
+          const key = entry.ext || entry.label;
+          const current = grouped.get(key) || {
+            label: entry.label,
+            ext: entry.ext,
+            calls: 0,
+            answered: 0,
+            missed: 0,
+            talking: 0,
+          };
+          current.calls += entry.calls;
+          current.answered += entry.answered;
+          current.missed += entry.missed;
+          current.talking += entry.talking;
+          grouped.set(key, current);
+        });
+        aggregated[category] = Array.from(grouped.values()).sort((a, b) => b.calls - a.calls);
+      });
+
+      return aggregated;
+    }
+
     function renderKPIs() {
-      const total = filteredData.length;
-      const answered = filteredData.filter((r) => (r.StatusClean || '').toLowerCase() === 'answered').length;
-      const missed = filteredData.filter((r) => ['no answer', 'missed'].includes((r.StatusClean || '').toLowerCase())).length;
-      const totalTalk = filteredData.reduce((sum, r) => sum + (Number(r.TalkingSeconds) || 0), 0);
-      const avgTalk = filteredData.length ? totalTalk / filteredData.length : 0;
+      const total = callAggregates.length;
+      const answered = callAggregates.filter((c) => c.answered).length;
+      const missed = callAggregates.filter((c) => !c.answered && c.missed).length;
+      const totalTalk = callAggregates.reduce((sum, c) => sum + (Number(c.talking) || 0), 0);
+      const avgTalk = total ? totalTalk / total : 0;
 
       const kpis = [
-        { label: 'Appels totaux', value: total },
+        { label: 'Appels totaux (Call ID)', value: total },
         { label: 'Répondus', value: answered },
-        { label: 'Manqués', value: missed },
+        { label: 'Non répondus / manqués', value: missed },
         { label: 'Durée moyenne de conversation (s)', value: avgTalk.toFixed(1) },
       ];
 
@@ -828,41 +991,20 @@
         .join('');
     }
 
-    function renderAgentTable() {
-      const grouped = {};
-      filteredData.forEach((row) => {
-        const key = row.AgentLabel || row.AgentName || row.AgentExt || 'Inconnu';
-        if (!grouped[key]) {
-          grouped[key] = {
-            Agent: key,
-            Ext: row.AgentExt || '',
-            Tracked: Boolean(row.AgentTracked),
-            Appels: 0,
-            Répondus: 0,
-            Manqués: 0,
-            TempsParole: 0,
-          };
-        }
-        grouped[key].Appels += 1;
-        const status = (row.StatusClean || '').toLowerCase();
-        if (status === 'answered') grouped[key].Répondus += 1;
-        if (['no answer', 'missed'].includes(status)) grouped[key].Manqués += 1;
-        grouped[key].TempsParole += Number(row.TalkingSeconds) || 0;
-      });
-
-      const rows = Object.values(grouped).sort((a, b) => b.Appels - a.Appels);
+    function renderCategoryTable(container, rows) {
       if (!rows.length) {
-        agentStats.innerHTML = '<p class="muted">Aucune donnée à afficher.</p>';
+        container.innerHTML = '<p class="muted">Aucune donnée à afficher.</p>';
         return;
       }
+
       const html = `
         <table>
           <thead>
             <tr>
-              <th>Agent</th>
-              <th>Appels</th>
+              <th>Extension</th>
+              <th>Appels (Call ID uniques)</th>
               <th>Répondus</th>
-              <th>Manqués</th>
+              <th>Manqués / non répondus</th>
               <th>Temps de parole moyen (s)</th>
             </tr>
           </thead>
@@ -871,17 +1013,17 @@
               .map(
                 (r) => `
                   <tr>
-                    <td>${r.Agent}${r.Ext ? ` (${r.Ext})` : ''}${r.Tracked ? ' ⭐' : ''}</td>
-                    <td>${r.Appels}</td>
-                    <td><span class="badge success">${r.Répondus}</span></td>
-                    <td><span class="badge warn">${r.Manqués}</span></td>
-                    <td>${(r.TempsParole / r.Appels || 0).toFixed(1)}</td>
+                    <td>${r.label}${r.ext ? ` (${r.ext})` : ''}</td>
+                    <td>${r.calls}</td>
+                    <td><span class="badge success">${r.answered}</span></td>
+                    <td><span class="badge warn">${r.missed}</span></td>
+                    <td>${(r.talking / r.calls || 0).toFixed(1)}</td>
                   </tr>`,
               )
               .join('')}
           </tbody>
         </table>`;
-      agentStats.innerHTML = html;
+      container.innerHTML = html;
     }
 
     function renderDataTable() {
@@ -890,6 +1032,7 @@
         return;
       }
       const headers = [
+        'Call ID',
         'Call Time',
         'From',
         'To',
@@ -898,6 +1041,7 @@
         'AgentLabel',
         'AgentExt',
         'AgentTracked',
+        'ExtensionCategory',
         'QueueLabel',
         'QueueNumber',
         'QueueGroup',
@@ -935,10 +1079,10 @@
       const dowOrder = ['lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi', 'dimanche'];
       const byDow = Object.fromEntries(dowOrder.map((d) => [d, 0]));
 
-      filteredData.forEach((row) => {
-        if (row.Date) byDate[row.Date] = (byDate[row.Date] || 0) + 1;
-        if (row.Hour !== '') byHour[Number(row.Hour)] += 1;
-        const dow = (row.DayOfWeek || '').toLowerCase();
+      callAggregates.forEach((row) => {
+        if (row.date) byDate[row.date] = (byDate[row.date] || 0) + 1;
+        if (row.hour !== '' && row.hour !== null && row.hour !== undefined) byHour[Number(row.hour)] += 1;
+        const dow = (row.dow || '').toLowerCase();
         if (dow in byDow) byDow[dow] += 1;
       });
 
