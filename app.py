@@ -596,6 +596,63 @@ def render_import_tab():
             st.experimental_rerun()
 
 
+def render_pilotage_tab():
+    """Affiche l'onglet Pilotage avec tous les indicateurs."""
+
+    if not st.session_state.imports:
+        st.info("Aucun fichier importé pour le moment. Ajoutez des CSV dans l'onglet Import.")
+        return
+
+    data = build_data_from_imports(st.session_state.imports)
+    if data.empty:
+        st.warning("Impossible de charger les données. Vérifiez le format des fichiers.")
+        return
+
+    render_file_summary([SimpleNamespace(name=imp["name"]) for imp in st.session_state.imports], data)
+
+    aggregated_calls = build_aggregated_calls(data)
+    if aggregated_calls.empty:
+        st.warning(
+            "Aucun appel décroché par les agents du standard (extensions 100–130) "
+            "n'a été identifié. Vérifiez le statut Answered dans vos exports."
+        )
+        return
+
+    st.info(
+        "Agrégation par Call ID : premier agent Standard qui décroche, "
+        "dernière file rencontrée avant décroché (exclusion de la file 992)."
+    )
+
+    st.subheader("Indicateurs clés (appels décroché)")
+    compute_kpis(aggregated_calls)
+
+    st.subheader("Statistiques par agent (appels décroché)")
+    st.dataframe(stats_by_agent(aggregated_calls))
+
+    st.subheader("Répartition par files d'attente (global)")
+    st.dataframe(stats_by_queue(aggregated_calls))
+
+    render_time_charts(aggregated_calls)
+
+    filtered = apply_filters(aggregated_calls)
+
+    st.subheader("Indicateurs clés (données filtrées)")
+    compute_kpis(filtered)
+
+    st.subheader("Statistiques par agent (données filtrées)")
+    st.dataframe(stats_by_agent(filtered))
+
+    st.subheader("Répartition par files d'attente (données filtrées)")
+    st.dataframe(stats_by_queue(filtered))
+
+    render_time_charts(filtered)
+
+    st.subheader("Données détaillées (appels agrégés après filtres)")
+    st.dataframe(filtered.head(500))
+
+    export_data(filtered)
+
+
 # -------------------------
 # Interface principale
 # -------------------------
@@ -624,58 +681,7 @@ def main():
         render_import_tab()
 
     with tabs[0]:
-        if not st.session_state.imports:
-            st.info("Aucun fichier importé pour le moment. Ajoutez des CSV dans l'onglet Import.")
-            return
-
-        data = build_data_from_imports(st.session_state.imports)
-        if data.empty:
-            st.warning("Impossible de charger les données. Vérifiez le format des fichiers.")
-            return
-
-        render_file_summary([SimpleNamespace(name=imp["name"]) for imp in st.session_state.imports], data)
-
-        aggregated_calls = build_aggregated_calls(data)
-        if aggregated_calls.empty:
-            st.warning(
-                "Aucun appel décroché par les agents du standard (extensions 100–130) "
-                "n'a été identifié. Vérifiez le statut Answered dans vos exports."
-            )
-            return
-
-        st.info(
-            "Agrégation par Call ID : premier agent Standard qui décroche, "
-            "dernière file rencontrée avant décroché (exclusion de la file 992)."
-        )
-
-        st.subheader("Indicateurs clés (appels décroché)")
-        compute_kpis(aggregated_calls)
-
-        st.subheader("Statistiques par agent (appels décroché)")
-        st.dataframe(stats_by_agent(aggregated_calls))
-
-        st.subheader("Répartition par files d'attente (global)")
-        st.dataframe(stats_by_queue(aggregated_calls))
-
-        render_time_charts(aggregated_calls)
-
-        filtered = apply_filters(aggregated_calls)
-
-        st.subheader("Indicateurs clés (données filtrées)")
-        compute_kpis(filtered)
-
-        st.subheader("Statistiques par agent (données filtrées)")
-        st.dataframe(stats_by_agent(filtered))
-
-        st.subheader("Répartition par files d'attente (données filtrées)")
-        st.dataframe(stats_by_queue(filtered))
-
-        render_time_charts(filtered)
-
-        st.subheader("Données détaillées (appels agrégés après filtres)")
-        st.dataframe(filtered.head(500))
-
-        export_data(filtered)
+        render_pilotage_tab()
 
 
 if __name__ == "__main__":
