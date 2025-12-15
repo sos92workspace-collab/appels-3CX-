@@ -8,7 +8,6 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet" />
   <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <style>
     :root {
@@ -107,33 +106,28 @@
     .badge.warn { background: rgba(234, 179, 8, 0.15); color: #fbbf24; }
     .actions { display: flex; gap: 0.75rem; flex-wrap: wrap; }
     .chart-wrapper { position: relative; height: 260px; }
+    .stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1rem; }
     @media (max-width: 680px) { header { position: static; } }
   </style>
 </head>
 <body>
   <header>
     <h1>Analyse locale des appels 3CX</h1>
-    <p class="subtitle">Chargez vos CSV ou fichiers Excel, analysez hors-ligne, exportez et sauvegardez vos données directement dans le navigateur.</p>
+    <p class="subtitle">Chargez vos fichiers CSV, analysez hors-ligne, exportez et sauvegardez vos données directement dans le navigateur.</p>
   </header>
 
   <main>
     <section>
-      <h2>1) Importer les CSV ou XLSX</h2>
+      <h2>1) Importer les CSV</h2>
       <div class="grid">
         <label class="dropzone">
-            <input id="file-input" type="file" accept=".csv,.xls,.xlsx" multiple style="display:none" />
-            Glissez-déposez vos fichiers CSV ou Excel ici ou cliquez pour les sélectionner (les données restent sur votre machine).
+            <input id="file-input" type="file" accept=".csv" multiple style="display:none" />
+            Glissez-déposez vos fichiers CSV ici ou cliquez pour les sélectionner (les données restent sur votre machine).
         </label>
         <div class="chip">
-          <label for="paste-input">Coller des données CSV / Excel</label>
-          <textarea id="paste-input" placeholder="Collez ici les lignes copiées depuis un tableur ou un fichier CSV (les données restent sur votre machine)."></textarea>
-          <button id="paste-btn" class="primary" type="button" style="margin-top:0.5rem">Charger depuis le collage</button>
-        </div>
-        <div class="chip">
-          <label>Sauvegarde navigateur (IndexedDB)</label>
+          <label>Sauvegarde automatique</label>
           <div class="actions">
-            <button id="save-local" class="primary" type="button">Sauvegarder les données</button>
-            <button id="clear-local" type="button">Effacer la sauvegarde</button>
+            <button id="clear-local" type="button">Effacer la sauvegarde locale</button>
           </div>
           <p id="save-status" class="muted" style="margin-top:0.5rem">Aucune sauvegarde locale pour le moment.</p>
         </div>
@@ -188,28 +182,24 @@
     <section>
       <h2>4) Statistiques</h2>
       <p class="muted">Les volumes sont consolidés au niveau <strong>Call ID</strong> pour éviter les doubles comptages des appels multi-lignes.</p>
-      <div class="grid">
+      <div class="stats-row">
         <div>
-          <h3>Bloc 1 : Agents du standard (100–130)</h3>
+          <h3>Bloc Standard</h3>
           <div id="standard-stats"></div>
         </div>
         <div>
-          <h3>Bloc 2 : Médecins (132–345)</h3>
-          <div id="medecin-stats"></div>
-        </div>
-        <div>
-          <h3>Bloc 3 : Files d'attente (≥ 800)</h3>
+          <h3>Bloc Files d'attente</h3>
           <div id="queue-stats"></div>
         </div>
+      </div>
+      <div class="stats-row">
         <div>
-          <h3>Autre / Inconnu</h3>
-          <div id="other-stats"></div>
+          <h3>Répartition des appels par jour</h3>
+          <div class="chart-wrapper"><canvas id="date-chart"></canvas></div>
         </div>
         <div>
-          <h3>Répartition temporelle</h3>
-          <div class="chart-wrapper"><canvas id="date-chart"></canvas></div>
-          <div class="chart-wrapper" style="margin-top:1rem"><canvas id="hour-chart"></canvas></div>
-          <div class="chart-wrapper" style="margin-top:1rem"><canvas id="dow-chart"></canvas></div>
+          <h3>Répartition des appels par heure</h3>
+          <div class="chart-wrapper"><canvas id="hour-chart"></canvas></div>
         </div>
       </div>
     </section>
@@ -236,12 +226,9 @@
     const endHourInput = document.getElementById('end-hour');
     const kpiContainer = document.getElementById('kpi-container');
     const standardStats = document.getElementById('standard-stats');
-    const medecinStats = document.getElementById('medecin-stats');
     const queueStats = document.getElementById('queue-stats');
-    const otherStats = document.getElementById('other-stats');
     const dataTable = document.getElementById('data-table');
     const saveStatus = document.getElementById('save-status');
-    const pasteInput = document.getElementById('paste-input');
 
     const TRACKED_EXTENSIONS = [
       { ext: '100', name: 'Abder Amazit' },
@@ -290,6 +277,20 @@
     const trackedExtensionMap = new Map(TRACKED_EXTENSIONS.map((entry) => [entry.ext, entry.name]));
     const trackedQueueMap = new Map(TRACKED_QUEUES.map((entry) => [entry.number, entry]));
 
+    const DIRECTION_LABELS = {
+      inbound: 'Appel entrant',
+      outbound: 'Appel sortant',
+      'inbound queue': 'Passage en file',
+      internal: 'Appel interne',
+    };
+
+    const STATUS_LABELS = {
+      answered: 'Répondu',
+      unanswered: 'Non répondu',
+      busy: 'Occupé',
+      failed: 'Échec',
+    };
+
     let rawData = [];
     let filteredData = [];
     let callAggregates = [];
@@ -303,9 +304,7 @@
     fileInput.addEventListener('change', (event) => handleFiles(event.target.files));
     document.getElementById('apply-filters').addEventListener('click', applyFilters);
     document.getElementById('export-btn').addEventListener('click', exportFiltered);
-    document.getElementById('save-local').addEventListener('click', manualPersist);
     document.getElementById('clear-local').addEventListener('click', clearIndexedDB);
-    document.getElementById('paste-btn').addEventListener('click', handlePasteData);
 
     const dropzone = document.querySelector('.dropzone');
     dropzone.addEventListener('click', () => fileInput.click());
@@ -350,10 +349,10 @@
           tx.oncomplete = resolve;
           tx.onerror = () => reject(tx.error);
         });
-        saveStatus.textContent = 'Données sauvegardées dans IndexedDB (stockage disque du navigateur).';
+        saveStatus.textContent = 'Données sauvegardées automatiquement dans le navigateur.';
       } catch (error) {
-        console.error('Impossible de sauvegarder dans IndexedDB', error);
-        saveStatus.textContent = "Échec de la sauvegarde IndexedDB. Les données restent en mémoire vive.";
+        console.error('Impossible de sauvegarder localement', error);
+        saveStatus.textContent = "Échec de la sauvegarde locale. Les données restent en mémoire vive.";
       }
     }
 
@@ -380,13 +379,13 @@
 
         if (rows.length) {
           rawData = rows;
-          fileSummary.textContent = `Données restaurées depuis IndexedDB – ${rawData.length} lignes.`;
+          fileSummary.textContent = `Données restaurées depuis la sauvegarde locale – ${rawData.length} lignes.`;
           populateFilters(rawData);
           applyFilters();
-          saveStatus.textContent = 'Données chargées depuis IndexedDB.';
+          saveStatus.textContent = 'Données chargées depuis la sauvegarde locale.';
         }
       } catch (error) {
-        console.error('Lecture IndexedDB impossible', error);
+        console.error('Lecture de la sauvegarde locale impossible', error);
       }
     }
 
@@ -403,16 +402,9 @@
       dataTable.innerHTML = '';
       kpiContainer.innerHTML = '';
       standardStats.innerHTML = '';
-      medecinStats.innerHTML = '';
       queueStats.innerHTML = '';
-      otherStats.innerHTML = '';
       fileSummary.textContent = 'Sauvegarde supprimée.';
       saveStatus.textContent = 'Aucune sauvegarde locale pour le moment.';
-    }
-
-    async function manualPersist() {
-      if (!rawData.length) return alert('Chargez des fichiers avant de sauvegarder.');
-      await persistDataset(rawData);
     }
 
     function handleFiles(files) {
@@ -447,49 +439,7 @@
       applyFilters();
     }
 
-    async function handlePasteData() {
-      const text = pasteInput.value.trim();
-      if (!text) return alert('Collez d\'abord des données copiées depuis votre fichier.');
-
-      const parsed = Papa.parse(text, { header: true, skipEmptyLines: 'greedy', dynamicTyping: false });
-      if (parsed.errors && parsed.errors.length) {
-        console.warn('Erreurs lors du collage :', parsed.errors);
-      }
-
-      if (!parsed.data || !parsed.data.length) {
-        return alert('Aucune ligne détectée dans les données collées.');
-      }
-
-      await ingestRows(parsed.data, 'Données collées');
-      pasteInput.value = '';
-    }
-
     function parseFile(file) {
-      const ext = file.name.split('.').pop().toLowerCase();
-
-      if (['xlsx', 'xls'].includes(ext)) {
-        return new Promise((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = (e) => {
-            try {
-              const workbook = XLSX.read(new Uint8Array(e.target.result), {
-                type: 'array',
-                cellDates: true,
-              });
-              const sheetName = workbook.SheetNames[0];
-              if (!sheetName) return resolve([]);
-              const sheet = workbook.Sheets[sheetName];
-              const json = XLSX.utils.sheet_to_json(sheet, { defval: '', raw: false });
-              resolve(json);
-            } catch (error) {
-              reject(error);
-            }
-          };
-          reader.onerror = reject;
-          reader.readAsArrayBuffer(file);
-        });
-      }
-
       return new Promise((resolve, reject) => {
         Papa.parse(file, {
           header: true,
@@ -730,14 +680,28 @@
       return { rows: cleanedRows, duplicates: duplicateCounter };
     }
 
+    function directionLabel(value) {
+      const key = (value || '').toString().toLowerCase();
+      return DIRECTION_LABELS[key] || value;
+    }
+
+    function statusLabel(value) {
+      const key = (value || '').toString().toLowerCase();
+      return STATUS_LABELS[key] || value;
+    }
+
     function populateFilters(data) {
-      const directions = Array.from(new Set(data.map((d) => d.DirectionClean).filter(Boolean))).sort();
-      const statuses = Array.from(new Set(data.map((d) => d.StatusClean).filter(Boolean))).sort();
+      const directions = Array.from(new Set(
+        data.map((d) => (d.DirectionClean || '').toLowerCase()).filter(Boolean),
+      )).sort();
+      const statuses = Array.from(new Set(
+        data.map((d) => (d.StatusClean || '').toLowerCase()).filter(Boolean),
+      )).sort();
       directionSelect.innerHTML = ['<option value="__all__" selected>Toutes les directions</option>']
-        .concat(directions.map((dir) => `<option value="${dir}">${dir}</option>`))
+        .concat(directions.map((dir) => `<option value="${dir}">${directionLabel(dir)}</option>`))
         .join('');
       statusSelect.innerHTML = ['<option value="__all__" selected>Tous les statuts</option>']
-        .concat(statuses.map((st) => `<option value="${st}">${st}</option>`))
+        .concat(statuses.map((st) => `<option value="${st}">${statusLabel(st)}</option>`))
         .join('');
 
       const agentOptionsMap = new Map();
@@ -799,7 +763,7 @@
       if (!startHourInput.value) startHourInput.value = 0;
       if (!endHourInput.value) endHourInput.value = 23;
 
-      saveStatus.textContent = 'Données chargées ; sauvegarde automatique dans IndexedDB.';
+      saveStatus.textContent = 'Données chargées ; sauvegarde automatique activée.';
     }
 
     function applyFilters() {
@@ -841,9 +805,7 @@
 
       renderKPIs();
       renderCategoryTable(standardStats, extensionAggregates.standard || []);
-      renderCategoryTable(medecinStats, extensionAggregates.medecin || []);
       renderCategoryTable(queueStats, extensionAggregates.queue || []);
-      renderCategoryTable(otherStats, extensionAggregates.other || []);
       renderDataTable();
       renderCharts();
     }
@@ -1076,29 +1038,21 @@
     function renderCharts() {
       const byDate = {};
       const byHour = Array(24).fill(0);
-      const dowOrder = ['lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi', 'dimanche'];
-      const byDow = Object.fromEntries(dowOrder.map((d) => [d, 0]));
 
       callAggregates.forEach((row) => {
         if (row.date) byDate[row.date] = (byDate[row.date] || 0) + 1;
         if (row.hour !== '' && row.hour !== null && row.hour !== undefined) byHour[Number(row.hour)] += 1;
-        const dow = (row.dow || '').toLowerCase();
-        if (dow in byDow) byDow[dow] += 1;
       });
 
-      createChart('date-chart', 'line', {
-        labels: Object.keys(byDate),
-        datasets: [{ label: 'Appels', data: Object.values(byDate), borderColor: '#22c55e', tension: 0.2 }],
+      const dateLabels = Object.keys(byDate).sort();
+      createChart('date-chart', 'bar', {
+        labels: dateLabels,
+        datasets: [{ label: 'Appels', data: dateLabels.map((d) => byDate[d]), backgroundColor: '#22c55e' }],
       });
 
       createChart('hour-chart', 'bar', {
         labels: Array.from({ length: 24 }, (_, i) => `${i}h`),
         datasets: [{ label: 'Appels', data: byHour, backgroundColor: '#22c55e' }],
-      });
-
-      createChart('dow-chart', 'bar', {
-        labels: dowOrder.map((d) => d.charAt(0).toUpperCase() + d.slice(1)),
-        datasets: [{ label: 'Appels', data: dowOrder.map((d) => byDow[d]), backgroundColor: '#22c55e' }],
       });
     }
 
