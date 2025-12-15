@@ -1185,9 +1185,10 @@
         if (row.hour !== '' && row.hour !== null && row.hour !== undefined) byHour[Number(row.hour)] += 1;
       });
 
-      const dateLabels = Object.keys(byDate).sort();
+      const dateLabels = Object.keys(byDate).sort((a, b) => new Date(a) - new Date(b));
+      const formattedDateLabels = dateLabels.map((d) => formatChartDateLabel(d));
       createChart('date-chart', 'bar', {
-        labels: dateLabels,
+        labels: formattedDateLabels,
         datasets: [{ label: 'Appels', data: dateLabels.map((d) => byDate[d]), backgroundColor: '#22c55e' }],
       });
 
@@ -1205,6 +1206,16 @@
         data,
         options: { responsive: true, plugins: { legend: { display: false } } },
       });
+    }
+
+    function formatChartDateLabel(value) {
+      if (!value) return '';
+      const date = new Date(value);
+      if (!(date instanceof Date) || Number.isNaN(date)) return value;
+      const day = String(date.getDate()).padStart(2, '0');
+      const month = String(date.getMonth() + 1).padStart(2, '0');
+      const year = date.getFullYear();
+      return `${day}:${month}:${year}`;
     }
 
     function switchTab(target) {
