@@ -572,10 +572,16 @@ def render_import_tab():
         st.info("Aucun fichier importé pour le moment.")
         return
 
+    header_cols = st.columns([2, 4, 3, 1])
+    header_cols[0].markdown("**Date d'import**")
+    header_cols[1].markdown("**Nom du fichier**")
+    header_cols[2].markdown("**Période des données**")
+    header_cols[3].markdown("**Actions**")
+
     for entry in list(st.session_state.imports):
         date_text = entry["uploaded_at"].strftime("%d/%m/%Y %H:%M")
         period_text = (
-            f"{entry['period_min']} → {entry['period_max']}"
+            f"{entry['period_min'].strftime('%d/%m/%Y')} → {entry['period_max'].strftime('%d/%m/%Y')}"
             if entry["period_min"] and entry["period_max"]
             else "Période inconnue"
         )
@@ -600,7 +606,7 @@ def main():
         """
         <style>
         .main .block-container {
-            max-width: 1100px;
+            max-width: 900px;
             padding-top: 2rem;
         }
         </style>
