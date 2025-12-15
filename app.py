@@ -741,6 +741,7 @@ def compute_open_percentage_for_city(
     total_interval = max(total_interval, 0)
 
     ordered = city_events.sort_values("created_at") if not city_events.empty else pd.DataFrame()
+    total_events = len(ordered)
     prior_events = ordered[ordered["created_at"] < start_dt] if not ordered.empty else pd.DataFrame()
     has_prior = not prior_events.empty
     last_prior = prior_events.iloc[-1] if has_prior else None
@@ -774,6 +775,7 @@ def compute_open_percentage_for_city(
         "event_count": len(window_events),
         "initial_state": initial_state,
         "has_prior": has_prior,
+        "total_events": total_events,
     }
 
 
@@ -833,6 +835,7 @@ def prepare_geojson_features(
                 "event_count": 0,
                 "initial_state": "closed",
                 "has_prior": False,
+                "total_events": 0,
             },
         )
 
@@ -843,19 +846,18 @@ def prepare_geojson_features(
         fill_color = color_from_percent(percent if metric.get("event_count") is not None else None)
         tooltip_lines = [f"Ouverture : {round((percent or 0) * 100)}%"]
 
-        if metric.get("event_count") == 0:
-            if metric.get("has_prior"):
-                open_label = format_duration(metric.get("duration_open", 0.0))
-                total_label = format_duration(metric.get("total_interval", 0.0))
-                tooltip_lines.append(f"Ouvert {open_label} / {total_label}")
-                tooltip_lines.append("Aucun nouvel événement")
-            else:
-                tooltip_lines.append("Aucun événement dans la période")
+        total_events = metric.get("total_events", metric.get("event_count", 0))
+        if total_events == 0:
+            tooltip_lines.append("Aucun événement")
         else:
-            open_label = format_duration(metric.get("duration_open", 0.0))
-            total_label = format_duration(metric.get("total_interval", 0.0))
-            tooltip_lines.append(f"Ouvert {open_label} / {total_label}")
-            tooltip_lines.append(f"{metric.get('event_count')} événement(s)")
+            if total_interval == 0:
+                tooltip_lines.append("Durée totale nulle")
+            else:
+                open_label = format_duration(metric.get("duration_open", 0.0))
+                total_label = format_duration(metric.get("total_interval", total_interval))
+                tooltip_lines.append(f"Ouvert {open_label} / {total_label}")
+
+            tooltip_lines.append(f"{metric.get('event_count', 0)} événement(s)")
             if not metric.get("has_prior"):
                 tooltip_lines.append("État initial supposé fermé")
 
@@ -1031,11 +1033,15 @@ def render_import_carte92_tab():
         st.info("Aucun événement importé pour le moment.")
 
 
-def render_pilotage_carte92_tab():
-    """Affiche la carte des communes du 92 avec le pourcentage d'ouverture."""
+def render_ville92_tab():
+    """Affiche la page Ville 92 avec carte, filtres et calculs d'ouverture."""
 
     ensure_carte92_state()
-    st.subheader("Pilotage ville 92")
+    st.subheader("Ville 92")
+    st.caption(
+        "Analyse des événements `trafic_changement_carte_92_events` : taux d'ouverture/fermeture par commune "
+        "des Hauts-de-Seine sur une fenêtre filtrée."
+    )
 
     events = st.session_state.carte92_events.copy()
     if events.empty:
@@ -1050,25 +1056,26 @@ def render_pilotage_carte92_tab():
     default_start = st.session_state.get("pilotage92_start", min_date)
     default_end = st.session_state.get("pilotage92_end", max_date)
 
-    if "pilotage92_filters" not in st.session_state:
-        st.session_state.pilotage92_filters = {
+    if "ville92_filters" not in st.session_state:
+        st.session_state.ville92_filters = {
             "start_date": default_start,
             "end_date": default_end,
             "start_time": datetime.strptime("00:00", "%H:%M").time(),
             "end_time": datetime.strptime("23:59", "%H:%M").time(),
         }
 
-    with st.form("pilotage_92_filters"):
+    st.markdown("**Toutes les dates/heures sont interprétées en Europe/Paris.**")
+    with st.form("ville_92_filters"):
         col1, col2 = st.columns(2)
         start_date = col1.date_input(
             "Date de début",
-            value=st.session_state.pilotage92_filters["start_date"],
+            value=st.session_state.ville92_filters["start_date"],
             min_value=min_date,
             max_value=max_date,
         )
         end_date = col2.date_input(
             "Date de fin",
-            value=st.session_state.pilotage92_filters["end_date"],
+            value=st.session_state.ville92_filters["end_date"],
             min_value=min_date,
             max_value=max_date,
         )
@@ -1076,18 +1083,18 @@ def render_pilotage_carte92_tab():
         col3, col4 = st.columns(2)
         start_time = col3.time_input(
             "Heure de début",
-            value=st.session_state.pilotage92_filters["start_time"],
+            value=st.session_state.ville92_filters["start_time"],
         )
         end_time = col4.time_input(
             "Heure de fin",
-            value=st.session_state.pilotage92_filters["end_time"],
+            value=st.session_state.ville92_filters["end_time"],
         )
 
         apply_filters_button = st.form_submit_button("Appliquer")
         reset_button = st.form_submit_button("Réinitialiser")
 
     if reset_button:
-        st.session_state.pilotage92_filters = {
+        st.session_state.ville92_filters = {
             "start_date": min_date,
             "end_date": max_date,
             "start_time": datetime.strptime("00:00", "%H:%M").time(),
@@ -1096,17 +1103,23 @@ def render_pilotage_carte92_tab():
         st.experimental_rerun()
 
     if apply_filters_button:
-        st.session_state.pilotage92_filters = {
+        proposed_filters = {
             "start_date": start_date,
             "end_date": end_date,
             "start_time": start_time,
             "end_time": end_time,
         }
+        start_dt_test = datetime.combine(start_date, start_time, tzinfo=PARIS_TZ)
+        end_dt_test = datetime.combine(end_date, end_time, tzinfo=PARIS_TZ)
+        if end_dt_test < start_dt_test:
+            st.error("La date/heure de fin doit être postérieure ou égale au début.")
+        else:
+            st.session_state.ville92_filters = proposed_filters
 
-    start_date = st.session_state.pilotage92_filters["start_date"]
-    end_date = st.session_state.pilotage92_filters["end_date"]
-    start_time = st.session_state.pilotage92_filters["start_time"]
-    end_time = st.session_state.pilotage92_filters["end_time"]
+    start_date = st.session_state.ville92_filters["start_date"]
+    end_date = st.session_state.ville92_filters["end_date"]
+    start_time = st.session_state.ville92_filters["start_time"]
+    end_time = st.session_state.ville92_filters["end_time"]
 
     st.session_state.pilotage92_start = start_date
     st.session_state.pilotage92_end = end_date
@@ -1115,7 +1128,7 @@ def render_pilotage_carte92_tab():
     end_dt = datetime.combine(end_date, end_time, tzinfo=PARIS_TZ)
 
     if end_dt < start_dt:
-        st.error("La date/heure de fin doit être postérieure au début.")
+        st.error("La date/heure de fin doit être postérieure ou égale au début.")
         return
 
     metrics = build_carte92_metrics(events, start_dt, end_dt)
@@ -1162,15 +1175,21 @@ def render_pilotage_carte92_tab():
                 "duration_open": 0.0,
                 "event_count": 0,
                 "has_prior": False,
+                "total_events": 0,
             },
         )
+        comment = ""
+        if metric.get("total_events", 0) == 0:
+            comment = "Aucun événement"
+        elif not metric.get("has_prior"):
+            comment = "Données initiales supposées fermées"
         rows.append(
             {
                 "Ville": name,
                 "% ouverture": round(metric.get("percent_open", 0) * 100),
                 "Événements": metric.get("event_count", 0),
                 "Durée ouverte": format_duration(metric.get("duration_open", 0.0)),
-                "Données initiales": "Connues" if metric.get("has_prior") else "Supposé fermé",
+                "Remarque": comment or "",
             }
         )
 
@@ -1206,7 +1225,7 @@ def main():
 
     ensure_import_state()
     ensure_carte92_state()
-    tabs = st.tabs(["Pilotage", "Import", "Import carte 92", "Pilotage ville 92"])
+    tabs = st.tabs(["Pilotage", "Import", "Import carte 92", "Ville 92"])
 
     with tabs[1]:
         render_import_tab()
@@ -1218,7 +1237,7 @@ def main():
         render_import_carte92_tab()
 
     with tabs[3]:
-        render_pilotage_carte92_tab()
+        render_ville92_tab()
 
 
 if __name__ == "__main__":
