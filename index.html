@@ -248,13 +248,20 @@
       { ext: '114', name: 'Sabrina Meskine' },
       { ext: '115', name: 'Sandrine Semedo Gonçalves' },
       { ext: '116', name: 'Salma Meskine' },
+      { ext: '117', name: 'Extension 117' },
       { ext: '118', name: 'Mael Cosnet' },
+      { ext: '119', name: 'Extension 119' },
+      { ext: '120', name: 'Extension 120' },
+      { ext: '121', name: 'Extension 121' },
+      { ext: '122', name: 'Extension 122' },
       { ext: '123', name: 'Reynald Celini' },
       { ext: '124', name: 'Maud Autonomis' },
       { ext: '125', name: 'Hanane Abbadi' },
       { ext: '126', name: 'Aéline Njem belle Ekwe' },
       { ext: '127', name: 'Autonomis 1' },
       { ext: '128', name: 'Autonomis 2' },
+      { ext: '129', name: 'Extension 129' },
+      { ext: '130', name: 'Extension 130' },
     ];
 
     const TRACKED_QUEUES = [
@@ -500,18 +507,21 @@
       const regex = /([^()]+?)\s*\((\d{2,})\)/;
       const dir = (direction || '').toLowerCase();
       const candidates = dir.includes('outbound')
-        ? [from, to]
+        ? [{ value: from, source: 'from' }]
         : dir.includes('inbound')
-          ? [to, from]
-          : [from, to];
+          ? [{ value: to, source: 'to' }]
+          : [
+              { value: from, source: 'from' },
+              { value: to, source: 'to' },
+            ];
 
       for (const candidate of candidates) {
-        const match = regex.exec(candidate || '');
+        const match = regex.exec(candidate.value || '');
         if (match) {
-          return { name: match[1].trim(), ext: match[2] };
+          return { name: match[1].trim(), ext: match[2], source: candidate.source };
         }
       }
-      return { name: '', ext: '' };
+      return { name: '', ext: '', source: '' };
     }
 
     function findTrackedExtension(...fields) {
@@ -530,7 +540,10 @@
         const text = (field || '').toString();
         for (const number of trackedQueueNumbers) {
           const regex = new RegExp(`\\b${number}\\b`);
-          if (regex.test(text)) return trackedQueueMap.get(number);
+          if (regex.test(text)) {
+            if (number === '992') return null;
+            return trackedQueueMap.get(number);
+          }
         }
       }
       return null;
@@ -611,14 +624,14 @@
         const callTime = parseDateTime(callTimeRaw);
         const agent = extractAgent(direction, from, to);
         const queueInfo = findTrackedQueue(from, to, details);
-        const extFallbackFields = direction.toLowerCase().includes('outbound')
-          ? [from]
-          : direction.toLowerCase().includes('inbound')
-            ? [to]
-            : [from, to];
-        const extension = agent.ext || findTrackedExtension(...extFallbackFields);
+        const extension = agent.ext;
         const agentName = agent.name || trackedExtensionMap.get(extension) || '';
         const extensionCategory = classifyExtension(extension);
+        const isInbound = (direction || '').toLowerCase().includes('inbound');
+        const isOutbound = (direction || '').toLowerCase().includes('outbound');
+        const standardEligible =
+          extensionCategory === 'standard' &&
+          ((isInbound && agent.source === 'to') || (isOutbound && agent.source === 'from') || (!isInbound && !isOutbound && !!extension));
         const record = {
           'Call ID': callId,
           'Call Time': callTimeRaw,
@@ -634,6 +647,7 @@
           AgentExt: extension,
           AgentTracked: Boolean(extension && trackedExtensionMap.has(extension)),
           ExtensionCategory: extensionCategory,
+          StandardEligible: standardEligible,
           QueueNumber: queueInfo?.number || '',
           QueueLabel: queueInfo?.label || '',
           QueueGroup: queueInfo?.group || queueInfo?.label || '',
@@ -704,26 +718,10 @@
         .concat(statuses.map((st) => `<option value="${st}">${statusLabel(st)}</option>`))
         .join('');
 
-      const agentOptionsMap = new Map();
-      TRACKED_EXTENSIONS.forEach(({ ext, name }) => {
-        agentOptionsMap.set(ext.toLowerCase(), { value: ext, label: `${ext} – ${name}` });
-      });
-
-      data
-        .filter((d) => d.AgentExt || d.AgentLabel)
-        .forEach((d) => {
-          const value = (d.AgentExt || d.AgentLabel || '').toString();
-          const ext = (d.AgentExt || '').toString();
-          const trackedName = trackedExtensionMap.get(ext);
-          const label = ext
-            ? `${ext} – ${trackedName || d.AgentLabel || 'Extension'}`
-            : d.AgentLabel || value;
-          agentOptionsMap.set(value.toLowerCase(), { value, label });
-        });
-
-      const agentOptions = Array.from(agentOptionsMap.values()).sort((a, b) =>
-        a.label.localeCompare(b.label, 'fr'),
-      );
+      const standardExtensions = Array.from({ length: 31 }, (_, i) => (100 + i).toString());
+      const agentOptions = standardExtensions
+        .map((ext) => ({ value: ext, label: `${ext} – ${trackedExtensionMap.get(ext) || 'Extension standard'}` }))
+        .sort((a, b) => a.value.localeCompare(b.value, 'fr'));
 
       agentSelect.innerHTML = ['<option value="__all__" selected>Tous les utilisateurs</option>']
         .concat(agentOptions.map((agent) => `<option value="${agent.value}">${agent.label}</option>`))
@@ -733,11 +731,11 @@
       TRACKED_QUEUES.forEach((entry) => {
         const value = entry.number;
         const label = `${entry.number} – ${entry.label}`;
-        queueOptionsMap.set(value.toLowerCase(), { value, label });
+        if (value !== '992') queueOptionsMap.set(value.toLowerCase(), { value, label });
       });
 
       data
-        .filter((d) => d.QueueLabel || d.QueueNumber)
+        .filter((d) => (d.QueueLabel || d.QueueNumber) && d.QueueNumber !== '992')
         .forEach((d) => {
           const value = (d.QueueNumber || d.QueueLabel || '').toString();
           const label = [d.QueueNumber, d.QueueLabel].filter(Boolean).join(' – ');
@@ -800,8 +798,10 @@
         return agentMatch && queueMatch && dateOk && hourOk && dirOk && statusOk;
       });
 
-      callAggregates = aggregateCalls(filteredData);
-      extensionAggregates = aggregateExtensions(filteredData);
+      const standardRows = filteredData.filter((row) => row.StandardEligible);
+
+      callAggregates = aggregateCalls(standardRows);
+      extensionAggregates = aggregateExtensions(standardRows);
 
       renderKPIs();
       renderCategoryTable(standardStats, extensionAggregates.standard || []);
@@ -822,13 +822,13 @@
         const callId = row['Call ID'] || `__missing_${index}`;
         const status = (row.StatusClean || '').toLowerCase();
         const isAnswered = status === 'answered';
+        const isFailure = ['no answer', 'missed', 'unanswered', 'busy', 'failed'].includes(status);
         const callTime = row.CallTime instanceof Date ? row.CallTime : row.CallTime ? new Date(row.CallTime) : null;
 
         const current = byCall.get(callId) || {
           callId,
           answered: false,
-          missed: false,
-          unanswered: false,
+          failures: false,
           talking: 0,
           ringing: 0,
           callTime: null,
@@ -838,8 +838,7 @@
         };
 
         current.answered = current.answered || isAnswered;
-        current.missed = current.missed || (!current.answered && ['no answer', 'missed'].includes(status));
-        current.unanswered = current.unanswered || (!current.answered && status === 'unanswered');
+        current.failures = current.failures || (!current.answered && isFailure);
         current.talking += Number(row.TalkingSeconds) || 0;
         current.ringing += Number(row.RingingSeconds) || 0;
 
@@ -853,92 +852,94 @@
         byCall.set(callId, current);
       });
 
-      return Array.from(byCall.values()).map((entry) => ({
-        ...entry,
-        missed: entry.answered ? false : entry.missed || entry.unanswered,
-      }));
+      return Array.from(byCall.values());
     }
 
     function aggregateExtensions(rows) {
-      const perCallExt = new Map();
+      const perCallAgent = new Map();
+      const perCallQueue = new Map();
 
       rows.forEach((row, index) => {
         const callId = row['Call ID'] || `__missing_${index}`;
-        const ext = row.AgentExt || '';
-        const label = row.AgentLabel || row.AgentName || ext || 'Autre / Inconnu';
-        const category = row.ExtensionCategory || classifyExtension(ext);
-        const key = `${callId}|${ext || label}|${category}`;
         const status = (row.StatusClean || '').toLowerCase();
         const isAnswered = status === 'answered';
-        const isMissed = ['no answer', 'missed', 'unanswered'].includes(status);
+        const isFailure = ['no answer', 'missed', 'unanswered', 'busy', 'failed'].includes(status);
 
-        const current = perCallExt.get(key) || {
-          callId,
-          ext,
-          label,
-          category,
-          answered: false,
-          missed: false,
-          talking: 0,
-        };
+        const ext = row.AgentExt || '';
+        const label = row.AgentLabel || row.AgentName || ext || 'Autre / Inconnu';
+        if (ext) {
+          const agentKey = `${callId}|${ext}`;
+          const current = perCallAgent.get(agentKey) || {
+            label,
+            ext,
+            calls: 0,
+            answered: 0,
+            failures: 0,
+            talking: 0,
+          };
+          current.calls = 1;
+          current.answered = current.answered || isAnswered ? 1 : 0;
+          current.failures = current.answered ? 0 : current.failures || isFailure ? 1 : 0;
+          current.talking += Number(row.TalkingSeconds) || 0;
+          perCallAgent.set(agentKey, current);
+        }
 
-        current.answered = current.answered || isAnswered;
-        current.missed = current.missed || (!current.answered && isMissed);
-        current.talking += Number(row.TalkingSeconds) || 0;
-
-        perCallExt.set(key, current);
+        if (row.QueueNumber && row.QueueNumber !== '992') {
+          const queueKey = `${callId}|${row.QueueNumber}`;
+          const queueCurrent = perCallQueue.get(queueKey) || {
+            label: row.QueueLabel || row.QueueNumber,
+            ext: row.QueueNumber,
+            calls: 0,
+            answered: 0,
+            failures: 0,
+            talking: 0,
+          };
+          queueCurrent.calls = 1;
+          queueCurrent.answered = queueCurrent.answered || isAnswered ? 1 : 0;
+          queueCurrent.failures = queueCurrent.answered ? 0 : queueCurrent.failures || isFailure ? 1 : 0;
+          queueCurrent.talking += Number(row.TalkingSeconds) || 0;
+          perCallQueue.set(queueKey, queueCurrent);
+        }
       });
 
-      const buckets = { standard: [], medecin: [], queue: [], other: [] };
-
-      perCallExt.forEach((entry) => {
-        const target = buckets[entry.category] || buckets.other;
-        target.push({
-          label: entry.label,
-          ext: entry.ext,
-          calls: 1,
-          answered: entry.answered ? 1 : 0,
-          missed: entry.answered ? 0 : entry.missed ? 1 : 0,
-          talking: entry.talking,
-        });
-      });
-
-      const aggregated = {};
-      Object.entries(buckets).forEach(([category, entries]) => {
+      const aggregateBucket = (map) => {
         const grouped = new Map();
-        entries.forEach((entry) => {
+        map.forEach((entry) => {
           const key = entry.ext || entry.label;
           const current = grouped.get(key) || {
             label: entry.label,
             ext: entry.ext,
             calls: 0,
             answered: 0,
-            missed: 0,
+            failures: 0,
             talking: 0,
           };
           current.calls += entry.calls;
           current.answered += entry.answered;
-          current.missed += entry.missed;
+          current.failures += entry.failures;
           current.talking += entry.talking;
           grouped.set(key, current);
         });
-        aggregated[category] = Array.from(grouped.values()).sort((a, b) => b.calls - a.calls);
-      });
+        return Array.from(grouped.values()).sort((a, b) => b.calls - a.calls);
+      };
 
-      return aggregated;
+      return {
+        standard: aggregateBucket(perCallAgent),
+        queue: aggregateBucket(perCallQueue),
+      };
     }
 
     function renderKPIs() {
       const total = callAggregates.length;
       const answered = callAggregates.filter((c) => c.answered).length;
-      const missed = callAggregates.filter((c) => !c.answered && c.missed).length;
+      const failures = callAggregates.filter((c) => !c.answered && c.failures).length;
       const totalTalk = callAggregates.reduce((sum, c) => sum + (Number(c.talking) || 0), 0);
       const avgTalk = total ? totalTalk / total : 0;
 
       const kpis = [
         { label: 'Appels totaux (Call ID)', value: total },
         { label: 'Répondus', value: answered },
-        { label: 'Non répondus / manqués', value: missed },
+        { label: "Échecs d'appel", value: failures },
         { label: 'Durée moyenne de conversation (s)', value: avgTalk.toFixed(1) },
       ];
 
@@ -966,7 +967,7 @@
               <th>Extension</th>
               <th>Appels (Call ID uniques)</th>
               <th>Répondus</th>
-              <th>Manqués / non répondus</th>
+              <th>Échecs d'appel</th>
               <th>Temps de parole moyen (s)</th>
             </tr>
           </thead>
@@ -978,7 +979,7 @@
                     <td>${r.label}${r.ext ? ` (${r.ext})` : ''}</td>
                     <td>${r.calls}</td>
                     <td><span class="badge success">${r.answered}</span></td>
-                    <td><span class="badge warn">${r.missed}</span></td>
+                    <td><span class="badge warn">${r.failures}</span></td>
                     <td>${(r.talking / r.calls || 0).toFixed(1)}</td>
                   </tr>`,
               )
