@@ -369,6 +369,7 @@
     let extensionAggregates = { standard: [], medecin: [], queue: [], other: [] };
     let charts = {};
     let importLog = [];
+    let selectedDate = null;
 
     const DB_NAME = 'appels3cx-db';
     const DB_VERSION = 1;
@@ -900,26 +901,28 @@
       callAggregates = aggregateCalls(eligibleData);
       extensionAggregates = aggregateExtensions(eligibleData);
 
-      renderKPIs();
-      renderCategoryTable(standardStats, extensionAggregates.standard || [], {
-        answeredLabel: 'Appels réussis',
-        showDirectionBreakdown: true,
-      });
-      const queueRows = (extensionAggregates.queue || []).map((row) => ({
-        ...row,
-        answered: Math.max(0, (row.calls || 0) - (row.failures || 0)),
-      }));
+      selectedDate = null;
 
-      renderCategoryTable(queueStats, queueRows, {
-        failureLabel: 'Appels perdus',
-      });
+      renderKPIs();
+      renderSelectionAwareViews();
       renderDataTable();
-      renderCharts();
     }
 
     function extractSelection(selectEl) {
       const values = Array.from(selectEl.selectedOptions).map((o) => o.value.toLowerCase());
       return values.includes('__all__') ? [] : values;
+    }
+
+    function getRowDate(row, callTimeOverride = null) {
+      const callTime =
+        callTimeOverride ??
+        (row.CallTime instanceof Date ? row.CallTime : row.CallTime ? new Date(row.CallTime) : null);
+
+      if (callTime instanceof Date && !Number.isNaN(callTime)) {
+        return row.Date || callTime.toISOString().slice(0, 10);
+      }
+
+      return row.Date || '';
     }
 
     function aggregateCalls(rows) {
@@ -931,6 +934,7 @@
         const isAnswered = status === 'answered';
         const isFailure = ['no answer', 'missed', 'unanswered', 'busy', 'failed'].includes(status);
         const callTime = row.CallTime instanceof Date ? row.CallTime : row.CallTime ? new Date(row.CallTime) : null;
+        const callDate = getRowDate(row, callTime);
 
         const current = byCall.get(callId) || {
           callId,
@@ -949,9 +953,11 @@
         current.talking += Number(row.TalkingSeconds) || 0;
         current.ringing += Number(row.RingingSeconds) || 0;
 
+        if (!current.date) current.date = callDate;
+
         if (callTime && (!current.callTime || callTime < current.callTime)) {
           current.callTime = callTime;
-          current.date = row.Date || callTime.toISOString().slice(0, 10);
+          current.date = callDate;
           current.hour = callTime.getHours();
           current.dow = callTime.toLocaleDateString('fr-FR', { weekday: 'long' });
         }
@@ -1178,20 +1184,69 @@
       dataTable.innerHTML = html;
     }
 
-    function renderCharts() {
+    function renderSelectionAwareViews() {
+      const { scopedCalls, scopedExtensions } = buildScopedAggregates();
+
+      renderCategoryTable(standardStats, scopedExtensions.standard || [], {
+        answeredLabel: 'Appels réussis',
+        showDirectionBreakdown: true,
+      });
+      const queueRows = (scopedExtensions.queue || []).map((row) => ({
+        ...row,
+        answered: Math.max(0, (row.calls || 0) - (row.failures || 0)),
+      }));
+
+      renderCategoryTable(queueStats, queueRows, {
+        failureLabel: 'Appels perdus',
+      });
+
+      renderCharts(scopedCalls);
+    }
+
+    function buildScopedAggregates() {
+      if (!selectedDate) {
+        return { scopedCalls: callAggregates, scopedExtensions: extensionAggregates };
+      }
+
+      const scopedRows = eligibleData.filter((row) => getRowDate(row) === selectedDate);
+      return {
+        scopedCalls: aggregateCalls(scopedRows),
+        scopedExtensions: aggregateExtensions(scopedRows),
+      };
+    }
+
+    function renderCharts(sourceAggregates = callAggregates) {
       const byDate = {};
       const byHour = Array(24).fill(0);
 
-      callAggregates.forEach((row) => {
+      sourceAggregates.forEach((row) => {
         if (row.date) byDate[row.date] = (byDate[row.date] || 0) + 1;
         if (row.hour !== '' && row.hour !== null && row.hour !== undefined) byHour[Number(row.hour)] += 1;
       });
 
       const dateLabels = Object.keys(byDate).sort((a, b) => new Date(a) - new Date(b));
       const formattedDateLabels = dateLabels.map((d) => formatChartDateLabel(d));
+      const dateColors = dateLabels.map((date) => (date === selectedDate ? '#f59e0b' : '#22c55e'));
+
       createChart('date-chart', 'bar', {
         labels: formattedDateLabels,
-        datasets: [{ label: 'Appels', data: dateLabels.map((d) => byDate[d]), backgroundColor: '#22c55e' }],
+        datasets: [
+          {
+            label: 'Appels',
+            data: dateLabels.map((d) => byDate[d]),
+            backgroundColor: dateColors,
+            borderColor: dateColors,
+            borderWidth: 1.2,
+          },
+        ],
+      }, {
+        onClick: (_, elements) => {
+          if (!elements.length) return;
+          const clickedIndex = elements[0].index;
+          const clickedDate = dateLabels[clickedIndex];
+          selectedDate = selectedDate === clickedDate ? null : clickedDate;
+          renderSelectionAwareViews();
+        },
       });
 
       createChart('hour-chart', 'bar', {
@@ -1200,13 +1255,13 @@
       });
     }
 
-    function createChart(id, type, data) {
+    function createChart(id, type, data, options = {}) {
       const ctx = document.getElementById(id);
       if (charts[id]) charts[id].destroy();
       charts[id] = new Chart(ctx, {
         type,
         data,
-        options: { responsive: true, plugins: { legend: { display: false } } },
+        options: { responsive: true, plugins: { legend: { display: false } }, ...options },
       });
     }
 
