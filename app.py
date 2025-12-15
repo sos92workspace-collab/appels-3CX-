@@ -6,16 +6,31 @@ et statut. Tout tient dans ce fichier unique pour un lancement simple via
 ``streamlit run app.py``.
 """
 
+import csv
+import hashlib
 import io
+import json
 import re
 import uuid
 from datetime import datetime
 from types import SimpleNamespace
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 import altair as alt
 import pandas as pd
+import pydeck as pdk
 import streamlit as st
+
+
+PARIS_TZ = ZoneInfo("Europe/Paris")
+EXPECTED_CARTE92_HEADER = [
+    "Créé le",
+    "Nom de la ville",
+    "Action",
+    "Secteur 92",
+    "Standardiste",
+]
 
 
 # -------------------------
@@ -69,6 +84,48 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = [str(col).strip().lstrip("\ufeff") for col in df.columns]
     return df
+
+
+def normalize_city_name(city: str) -> str:
+    """Normalise le nom d'une ville pour les comparaisons insensibles à la casse."""
+
+    normalized = " ".join(str(city).strip().split())
+    return normalized.lower()
+
+
+def extract_columns_from_bytes(file_bytes: bytes) -> List[str]:
+    """Retourne la liste des colonnes d'un CSV en UTF-8-SIG sans consommer le buffer."""
+
+    try:
+        preview = pd.read_csv(io.BytesIO(file_bytes), encoding="utf-8-sig", sep=",", nrows=0)
+    except Exception:
+        return []
+    return [str(col).strip().lstrip("\ufeff") for col in preview.columns]
+
+
+def is_carte92_csv(file_bytes: bytes) -> bool:
+    """Détermine si un fichier correspond exactement au format trafic_changement_carte_92."""
+
+    columns = extract_columns_from_bytes(file_bytes)
+    return columns == EXPECTED_CARTE92_HEADER
+
+
+def parse_carte92_datetime(value: str) -> Optional[datetime]:
+    """Parse une date au format DD/MM/YYYY HH:mm en timezone Europe/Paris."""
+
+    text = str(value).strip()
+    try:
+        naive = datetime.strptime(text, "%d/%m/%Y %H:%M")
+    except ValueError:
+        return None
+    return naive.replace(tzinfo=PARIS_TZ)
+
+
+def build_carte92_event_id(created_at: datetime, city: str, action: str, sector_92: str, operator: str) -> str:
+    """Construit la clé de déduplication deterministe pour un événement carte 92."""
+
+    payload = f"{created_at.isoformat()}|{city}|{action}|{sector_92}|{operator}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def convert_duration_to_seconds(series: pd.Series) -> pd.Series:
@@ -264,6 +321,112 @@ def build_aggregated_calls(df: pd.DataFrame) -> pd.DataFrame:
             records.append(aggregated)
 
     return pd.DataFrame.from_records(records)
+
+
+def ensure_carte92_state():
+    """Initialise les structures de stockage pour les imports carte 92."""
+
+    if "carte92_events" not in st.session_state:
+        st.session_state.carte92_events = pd.DataFrame(
+            columns=[
+                "event_id",
+                "created_at",
+                "city",
+                "normalized_city",
+                "action",
+                "sector_92",
+                "operator",
+                "imported_at",
+                "source_file",
+            ]
+        )
+
+    if "carte92_last_result" not in st.session_state:
+        st.session_state.carte92_last_result = None
+
+
+def parse_trafic_changement_carte_92(
+    uploaded_file: st.runtime.uploaded_file_manager.UploadedFile,
+) -> SimpleNamespace:
+    """Traite un CSV trafic_changement_carte_92 et retourne un rapport d'import."""
+
+    file_bytes = uploaded_file.getvalue()
+    if not is_carte92_csv(file_bytes):
+        return SimpleNamespace(handled=False, reason="header_mismatch")
+
+    raw_df = pd.read_csv(
+        io.BytesIO(file_bytes),
+        encoding="utf-8-sig",
+        sep=",",
+        dtype=str,
+        quotechar="\"",
+        engine="python",
+    )
+    raw_df = normalize_columns(raw_df)
+
+    errors: List[str] = []
+    duplicates = 0
+    records = []
+    existing_ids = set(st.session_state.carte92_events.get("event_id", []))
+    seen_ids = set(existing_ids)
+    imported_at = datetime.now(PARIS_TZ)
+
+    for idx, row in raw_df.iterrows():
+        line_number = idx + 2  # +1 for header, +1 for 1-indexing
+        created_at = parse_carte92_datetime(row.get("Créé le", ""))
+        city = str(row.get("Nom de la ville", "")).strip()
+        action = str(row.get("Action", "")).strip()
+        sector_92 = str(row.get("Secteur 92", "")).strip()
+        operator = str(row.get("Standardiste", "")).strip()
+
+        if not created_at:
+            errors.append(f"Ligne {line_number}: date invalide ({row.get('Créé le')}).")
+            continue
+
+        if not city:
+            errors.append(f"Ligne {line_number}: ville manquante.")
+            continue
+
+        if action not in {"Ouverture", "Fermeture"}:
+            errors.append(f"Ligne {line_number}: action inconnue ({action}).")
+            continue
+
+        event_id = build_carte92_event_id(created_at, city, action, sector_92, operator)
+        if event_id in seen_ids:
+            duplicates += 1
+            continue
+
+        seen_ids.add(event_id)
+        records.append(
+            {
+                "event_id": event_id,
+                "created_at": created_at,
+                "city": city,
+                "normalized_city": normalize_city_name(city),
+                "action": action,
+                "sector_92": sector_92,
+                "operator": operator,
+                "imported_at": imported_at,
+                "source_file": uploaded_file.name,
+            }
+        )
+
+    df = pd.DataFrame.from_records(records)
+    if not df.empty:
+        st.session_state.carte92_events = pd.concat(
+            [st.session_state.carte92_events, df], ignore_index=True
+        )
+
+    result = SimpleNamespace(
+        handled=True,
+        total_rows=len(raw_df),
+        inserted=len(df),
+        duplicates=duplicates,
+        errors=errors,
+        source=uploaded_file.name,
+    )
+    st.session_state.carte92_last_result = result
+    return result
 
 
 def validate_required_columns(df: pd.DataFrame, filename: str) -> List[str]:
@@ -555,6 +718,163 @@ def build_data_from_imports(import_entries: List[dict]) -> pd.DataFrame:
     return load_and_prepare_data(buffers)
 
 
+@st.cache_data
+def load_geojson_92(path: str) -> dict:
+    """Charge le GeoJSON des communes du 92."""
+
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except FileNotFoundError:
+        st.error("GeoJSON des communes 92 introuvable.")
+    except json.JSONDecodeError:
+        st.error("GeoJSON invalide pour les communes du 92.")
+    return {}
+
+
+def compute_open_percentage_for_city(
+    city_events: pd.DataFrame, start_dt: datetime, end_dt: datetime
+) -> dict:
+    """Calcule les métriques d'ouverture pour une ville donnée."""
+
+    total_interval = (end_dt - start_dt).total_seconds()
+    total_interval = max(total_interval, 0)
+
+    ordered = city_events.sort_values("created_at") if not city_events.empty else pd.DataFrame()
+    prior_events = ordered[ordered["created_at"] < start_dt] if not ordered.empty else pd.DataFrame()
+    has_prior = not prior_events.empty
+    last_prior = prior_events.iloc[-1] if has_prior else None
+    initial_state = "open" if last_prior is not None and last_prior["action"] == "Ouverture" else "closed"
+
+    window_events = ordered[
+        (ordered["created_at"] >= start_dt) & (ordered["created_at"] <= end_dt)
+    ]
+
+    current_state_open = initial_state == "open"
+    current_time = start_dt
+    open_seconds = 0.0
+
+    for _, event in window_events.iterrows():
+        event_time = event["created_at"]
+        if current_state_open:
+            open_seconds += (event_time - current_time).total_seconds()
+
+        current_state_open = event["action"] == "Ouverture"
+        current_time = event_time
+
+    if current_state_open and total_interval > 0:
+        open_seconds += (end_dt - current_time).total_seconds()
+
+    percent = (open_seconds / total_interval) if total_interval > 0 else 0.0
+
+    return {
+        "percent_open": percent,
+        "duration_open": open_seconds,
+        "total_interval": total_interval,
+        "event_count": len(window_events),
+        "initial_state": initial_state,
+        "has_prior": has_prior,
+    }
+
+
+def build_carte92_metrics(events_df: pd.DataFrame, start_dt: datetime, end_dt: datetime) -> dict:
+    """Construit les métriques d'ouverture pour chaque ville importée."""
+
+    metrics = {}
+    if events_df.empty:
+        return metrics
+
+    for normalized_city, group in events_df.groupby("normalized_city"):
+        metrics[normalized_city] = compute_open_percentage_for_city(group, start_dt, end_dt)
+    return metrics
+
+
+def color_from_percent(percent: Optional[float]) -> List[int]:
+    """Retourne une couleur RGBA allant du rouge (0%) au vert (100%)."""
+
+    if percent is None:
+        return [180, 180, 180, 120]
+
+    percent = max(0.0, min(1.0, percent))
+    red = int(220 * (1 - percent))
+    green = int(190 * percent)
+    return [red, green, 80, 160]
+
+
+def format_duration(seconds: float) -> str:
+    """Formate une durée en secondes en HH:MM."""
+
+    if seconds <= 0:
+        return "0h00"
+    minutes, _ = divmod(int(seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h{minutes:02d}"
+
+
+def prepare_geojson_features(
+    geojson_data: dict, metrics: dict, total_interval: float
+) -> Tuple[list, set]:
+    """Injecte les métriques dans les features GeoJSON et retourne aussi la liste des villes non matchées."""
+
+    features = geojson_data.get("features", []) if geojson_data else []
+    unmatched_metrics = set(metrics.keys())
+    enriched_features = []
+
+    for feature in features:
+        properties = feature.get("properties", {})
+        city_name = properties.get("nom") or properties.get("name") or ""
+        normalized_name = normalize_city_name(city_name)
+        metric = metrics.get(
+            normalized_name,
+            {
+                "percent_open": 0.0,
+                "duration_open": 0.0,
+                "total_interval": total_interval,
+                "event_count": 0,
+                "initial_state": "closed",
+                "has_prior": False,
+            },
+        )
+
+        if normalized_name in unmatched_metrics:
+            unmatched_metrics.remove(normalized_name)
+
+        percent = metric.get("percent_open")
+        fill_color = color_from_percent(percent if metric.get("event_count") is not None else None)
+        tooltip_lines = [f"Ouverture : {round((percent or 0) * 100)}%"]
+
+        if metric.get("event_count") == 0:
+            if metric.get("has_prior"):
+                open_label = format_duration(metric.get("duration_open", 0.0))
+                total_label = format_duration(metric.get("total_interval", 0.0))
+                tooltip_lines.append(f"Ouvert {open_label} / {total_label}")
+                tooltip_lines.append("Aucun nouvel événement")
+            else:
+                tooltip_lines.append("Aucun événement dans la période")
+        else:
+            open_label = format_duration(metric.get("duration_open", 0.0))
+            total_label = format_duration(metric.get("total_interval", 0.0))
+            tooltip_lines.append(f"Ouvert {open_label} / {total_label}")
+            tooltip_lines.append(f"{metric.get('event_count')} événement(s)")
+            if not metric.get("has_prior"):
+                tooltip_lines.append("État initial supposé fermé")
+
+        enriched_feature = feature.copy()
+        enriched_properties = {**properties}
+        enriched_properties.update(
+            {
+                "percent_open": percent,
+                "percent_label": f"{round((percent or 0) * 100)}%",
+                "fill_color": fill_color,
+                "tooltip_detail": "<br/>".join(tooltip_lines),
+            }
+        )
+        enriched_feature["properties"] = enriched_properties
+        enriched_features.append(enriched_feature)
+
+    return enriched_features, unmatched_metrics
+
+
 def render_import_tab():
     """Affiche l'onglet Import pour téléverser et gérer les fichiers."""
 
@@ -653,6 +973,177 @@ def render_pilotage_tab():
     export_data(filtered)
 
 
+def render_carte92_import_summary(result: Optional[SimpleNamespace]):
+    """Affiche le résumé d'un import carte 92."""
+
+    if not result or not getattr(result, "handled", False):
+        return
+
+    cols = st.columns(3)
+    cols[0].metric("Lignes lues", result.total_rows)
+    cols[1].metric("Enregistrées", result.inserted)
+    cols[2].metric("Doublons", result.duplicates)
+
+    if result.errors:
+        st.error(f"{len(result.errors)} ligne(s) en erreur")
+        for err in result.errors:
+            st.caption(err)
+    else:
+        st.success("Aucune erreur détectée sur ce fichier.")
+
+
+def render_import_carte92_tab():
+    """Interface dédiée à l'import trafic_changement_carte_92."""
+
+    ensure_carte92_state()
+    st.subheader("Importer un CSV trafic_changement_carte_92")
+    uploaded_file = st.file_uploader(
+        "Sélectionnez un fichier CSV (UTF-8, séparateur virgule)",
+        type="csv",
+        key="carte92_uploader",
+    )
+
+    if st.button("Importer", type="primary"):
+        if not uploaded_file:
+            st.warning("Aucun fichier sélectionné.")
+        else:
+            result = parse_trafic_changement_carte_92(uploaded_file)
+            if not result.handled:
+                st.warning(
+                    "En-tête non conforme : ce fichier a été ignoré afin de laisser les autres imports le traiter."
+                )
+            else:
+                st.success(f"Import de {uploaded_file.name} terminé.")
+                render_carte92_import_summary(result)
+
+    if st.session_state.carte92_last_result:
+        with st.expander("Dernier import carte 92"):
+            render_carte92_import_summary(st.session_state.carte92_last_result)
+
+    st.subheader("Événements enregistrés")
+    total_events = len(st.session_state.carte92_events)
+    st.caption(f"{total_events} événement(s) uniques enregistrés.")
+    if total_events:
+        st.dataframe(
+            st.session_state.carte92_events.sort_values("created_at", ascending=False).head(200)
+        )
+    else:
+        st.info("Aucun événement importé pour le moment.")
+
+
+def render_pilotage_carte92_tab():
+    """Affiche la carte des communes du 92 avec le pourcentage d'ouverture."""
+
+    ensure_carte92_state()
+    st.subheader("Pilotage ville 92")
+
+    events = st.session_state.carte92_events.copy()
+    if events.empty:
+        st.info("Importez d'abord des événements via l'onglet Import carte 92.")
+        return
+
+    events["created_at"] = pd.to_datetime(events["created_at"], utc=True).dt.tz_convert(PARIS_TZ)
+
+    min_date = events["created_at"].min().date()
+    max_date = events["created_at"].max().date()
+
+    default_start = st.session_state.get("pilotage92_start", min_date)
+    default_end = st.session_state.get("pilotage92_end", max_date)
+
+    with st.form("pilotage_92_filters"):
+        col1, col2 = st.columns(2)
+        start_date = col1.date_input("Date de début", value=default_start, min_value=min_date, max_value=max_date)
+        end_date = col2.date_input("Date de fin", value=default_end, min_value=min_date, max_value=max_date)
+
+        col3, col4 = st.columns(2)
+        start_time = col3.time_input("Heure de début", value=datetime.strptime("00:00", "%H:%M").time())
+        end_time = col4.time_input("Heure de fin", value=datetime.strptime("23:59", "%H:%M").time())
+
+        _apply_filters_button = st.form_submit_button("Appliquer")
+        reset_button = st.form_submit_button("Réinitialiser")
+
+    if reset_button:
+        st.session_state.pilotage92_start = min_date
+        st.session_state.pilotage92_end = max_date
+        start_date, end_date = min_date, max_date
+        start_time = datetime.strptime("00:00", "%H:%M").time()
+        end_time = datetime.strptime("23:59", "%H:%M").time()
+
+    st.session_state.pilotage92_start = start_date
+    st.session_state.pilotage92_end = end_date
+
+    start_dt = datetime.combine(start_date, start_time, tzinfo=PARIS_TZ)
+    end_dt = datetime.combine(end_date, end_time, tzinfo=PARIS_TZ)
+
+    if end_dt < start_dt:
+        st.error("La date/heure de fin doit être postérieure au début.")
+        return
+
+    metrics = build_carte92_metrics(events, start_dt, end_dt)
+    total_interval = max((end_dt - start_dt).total_seconds(), 0)
+
+    geojson_data = load_geojson_92("assets/communes-hauts-de-seine.geojson")
+    features, unmatched_metrics = prepare_geojson_features(geojson_data, metrics, total_interval)
+
+    if not features:
+        st.warning("Aucune donnée cartographique disponible.")
+        return
+
+    layer = pdk.Layer(
+        "GeoJsonLayer",
+        data={"type": "FeatureCollection", "features": features},
+        stroked=True,
+        filled=True,
+        extruded=False,
+        get_fill_color="properties.fill_color",
+        get_line_color=[60, 60, 60, 180],
+        line_width_min_pixels=1,
+        pickable=True,
+        auto_highlight=True,
+    )
+
+    view_state = pdk.ViewState(latitude=48.85, longitude=2.25, zoom=10.5)
+    tooltip = {
+        "html": "<b>{nom}</b><br/>{percent_label}<br/>{tooltip_detail}",
+        "style": {"backgroundColor": "white", "color": "#111"},
+    }
+
+    st.pydeck_chart(pdk.Deck(layers=[layer], initial_view_state=view_state, tooltip=tooltip))
+
+    st.subheader("Synthèse par ville")
+    rows = []
+    for feature in features:
+        props = feature.get("properties", {})
+        name = props.get("nom") or props.get("name") or "Inconnue"
+        normalized_name = normalize_city_name(name)
+        metric = metrics.get(
+            normalized_name,
+            {
+                "percent_open": 0.0,
+                "duration_open": 0.0,
+                "event_count": 0,
+                "has_prior": False,
+            },
+        )
+        rows.append(
+            {
+                "Ville": name,
+                "% ouverture": round(metric.get("percent_open", 0) * 100),
+                "Événements": metric.get("event_count", 0),
+                "Durée ouverte": format_duration(metric.get("duration_open", 0.0)),
+                "Données initiales": "Connues" if metric.get("has_prior") else "Supposé fermé",
+            }
+        )
+
+    st.dataframe(pd.DataFrame(rows))
+
+    if unmatched_metrics:
+        st.warning(
+            "Certaines villes importées n'ont pas été trouvées dans le GeoJSON : "
+            + ", ".join(sorted(unmatched_metrics))
+        )
+
+
 # -------------------------
 # Interface principale
 # -------------------------
@@ -675,13 +1166,20 @@ def main():
     st.write("Importez un ou plusieurs fichiers CSV 3CX pour analyser l'activité du standard.")
 
     ensure_import_state()
-    tabs = st.tabs(["Pilotage", "Import"])
+    ensure_carte92_state()
+    tabs = st.tabs(["Pilotage", "Import", "Import carte 92", "Pilotage ville 92"])
 
     with tabs[1]:
         render_import_tab()
 
     with tabs[0]:
         render_pilotage_tab()
+
+    with tabs[2]:
+        render_import_carte92_tab()
+
+    with tabs[3]:
+        render_pilotage_carte92_tab()
 
 
 if __name__ == "__main__":
