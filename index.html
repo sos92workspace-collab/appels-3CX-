@@ -366,6 +366,7 @@
     let rawData = [];
     let filteredData = [];
     let eligibleData = [];
+    let standardEligibleData = [];
     let callAggregates = [];
     let extensionAggregates = { standard: [], medecin: [], queue: [], other: [] };
     let charts = {};
@@ -473,6 +474,7 @@
       });
       rawData = [];
       filteredData = [];
+      standardEligibleData = [];
       callAggregates = [];
       extensionAggregates = { standard: [], medecin: [], queue: [], other: [] };
       dataTable.innerHTML = '';
@@ -898,9 +900,10 @@
       });
 
       eligibleData = filteredData.filter((row) => row.AgentDirectionMatch);
+      standardEligibleData = filterStandardInvolvedCalls(eligibleData);
 
-      callAggregates = aggregateCalls(eligibleData);
-      extensionAggregates = aggregateExtensions(eligibleData);
+      callAggregates = aggregateCalls(standardEligibleData);
+      extensionAggregates = aggregateExtensions(standardEligibleData);
 
       selectedDate = null;
 
@@ -924,6 +927,22 @@
       }
 
       return row.Date || '';
+    }
+
+    function filterStandardInvolvedCalls(rows) {
+      const standardCallIds = new Set();
+
+      rows.forEach((row, index) => {
+        const callId = row['Call ID'] || `__missing_${index}`;
+        if ((row.ExtensionCategory || '').toLowerCase() === 'standard') {
+          standardCallIds.add(callId);
+        }
+      });
+
+      return rows.filter((row, index) => {
+        const callId = row['Call ID'] || `__missing_${index}`;
+        return standardCallIds.has(callId);
+      });
     }
 
     function aggregateCalls(rows) {
@@ -1210,7 +1229,7 @@
         return { scopedCalls: callAggregates, scopedExtensions: extensionAggregates };
       }
 
-      const scopedRows = eligibleData.filter((row) => getRowDate(row) === selectedDate);
+      const scopedRows = standardEligibleData.filter((row) => getRowDate(row) === selectedDate);
       return {
         scopedCalls: aggregateCalls(scopedRows),
         scopedExtensions: aggregateExtensions(scopedRows),
