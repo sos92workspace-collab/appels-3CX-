@@ -341,6 +341,19 @@
         <div class="legend" id="ville92-legend" aria-label="Légende des couleurs"></div>
       </div>
 
+      <div class="grid" style="margin-top:1rem">
+        <section>
+          <h3>Ouverture par sous-secteur</h3>
+          <p class="muted">Moyenne des taux d'ouverture des villes rattachées à chaque sous-secteur.</p>
+          <div id="ville92-subsector"></div>
+        </section>
+        <section>
+          <h3>Ouverture par secteur</h3>
+          <p class="muted">Moyenne consolidée de l'ensemble des sous-secteurs du secteur.</p>
+          <div id="ville92-sector"></div>
+        </section>
+      </div>
+
       <div id="ville92-summary" style="margin-top:1rem"></div>
       <div id="ville92-unmatched" class="muted"></div>
     </section>
@@ -377,6 +390,8 @@
     const ville92Summary = document.getElementById('ville92-summary');
     const ville92Unmatched = document.getElementById('ville92-unmatched');
     const ville92Legend = document.getElementById('ville92-legend');
+    const ville92Subsector = document.getElementById('ville92-subsector');
+    const ville92Sector = document.getElementById('ville92-sector');
 
     const TRACKED_EXTENSIONS = [
       { ext: '100', name: 'Abder Amazit' },
@@ -454,6 +469,19 @@
       failed: 'Échec',
       waiting: 'En attente',
     };
+
+    const VILLE92_SUB_SECTORS = [
+      {
+        code: 'S5',
+        sector: 'Sud',
+        cities: ['Châtillon', 'Clamart', 'Clamart (Le Petit Clamart)', 'Meudon', 'Meudon-la-Forêt', 'Montrouge', 'Vanves'],
+      },
+      { code: 'S6', sector: 'Sud', cities: ['Antony', 'Bagneux', 'Bourg-la-Reine', 'Châtenay-Malabry', 'Sceaux'] },
+      { code: 'N1', sector: 'Nord', cities: ['Asnières-sur-Seine', 'Bois-Colombes', 'Colombes', 'Villeneuve-la-Garenne'] },
+      { code: 'N2', sector: 'Nord', cities: ['Clichy', 'Courbevoie', 'Neuilly-sur-Seine'] },
+      { code: 'N3', sector: 'Nord', cities: ['Nanterre', 'Puteaux', 'Rueil-Malmaison', 'Suresnes'] },
+      { code: 'C4', sector: 'Centre', cities: ['Boulogne', 'Chaville', 'Marnes-la-Coquette', 'Saint-Cloud', 'Sèvres', 'Vaucresson', 'Ville-d’Avray'] },
+    ];
 
     function normalizeStatus(value) {
       return (value || '').toString().trim().toLowerCase();
@@ -2040,6 +2068,11 @@
       `;
     }
 
+    function formatPercent(value, decimals = 1) {
+      const percent = Math.max(0, Math.min(1, Number(value) || 0)) * 100;
+      return `${percent.toFixed(decimals)}%`;
+    }
+
     function renderVille92SummaryTable(features) {
       if (!ville92Summary) return;
       if (!features.length) {
@@ -2085,9 +2118,134 @@
       ville92Summary.innerHTML = html;
     }
 
+    function computeVille92Aggregates(metrics) {
+      if (!metrics) return { subSectors: [], sectors: [] };
+
+      const subSectors = VILLE92_SUB_SECTORS.map((definition) => {
+        const cityEntries = definition.cities.map((city) => {
+          const key = normalizeCityKey(city);
+          const metric = metrics[key] || { percentOpen: 0, eventCount: 0, totalEvents: 0 };
+          const percentOpen = Number.isFinite(metric.percentOpen) ? metric.percentOpen : 0;
+          const hasData = Boolean(metric.eventCount || metric.totalEvents);
+          return { city, percentOpen, hasData };
+        });
+
+        const average = cityEntries.length
+          ? cityEntries.reduce((sum, entry) => sum + entry.percentOpen, 0) / cityEntries.length
+          : 0;
+        const coverage = cityEntries.filter((entry) => entry.hasData).length;
+
+        return {
+          code: definition.code,
+          sector: definition.sector,
+          average,
+          coverage,
+          totalCities: cityEntries.length,
+          cityEntries,
+        };
+      });
+
+      const sectorCityMap = subSectors.reduce((acc, sub) => {
+        acc[sub.sector] = acc[sub.sector] || [];
+        acc[sub.sector].push(...sub.cityEntries);
+        return acc;
+      }, {});
+
+      const sectors = Object.entries(sectorCityMap).map(([name, cityEntries]) => {
+        const average = cityEntries.length
+          ? cityEntries.reduce((sum, entry) => sum + entry.percentOpen, 0) / cityEntries.length
+          : 0;
+        const coverage = cityEntries.filter((entry) => entry.hasData).length;
+        return { name, average, coverage, totalCities: cityEntries.length };
+      });
+
+      return { subSectors, sectors };
+    }
+
+    function buildVille92AggregateTable(rows, options = {}) {
+      const { showSector = false, label = 'Secteur' } = options;
+      if (!rows.length) return '<p class="muted">Aucune donnée disponible.</p>';
+
+      const sortedRows = rows
+        .map((row) => ({
+          ...row,
+          average: Number.isFinite(row.average) ? row.average : 0,
+        }))
+        .sort((a, b) => a[label ? 'label' : 'name']?.localeCompare(b[label ? 'label' : 'name'], 'fr'));
+
+      const header = showSector
+        ? `
+          <th>${label}</th>
+          <th>Secteur</th>
+          <th>% ouverture</th>
+          <th>Villes couvertes</th>`
+        : `
+          <th>${label}</th>
+          <th>% ouverture</th>
+          <th>Villes couvertes</th>`;
+
+      const body = sortedRows
+        .map((row) => {
+          const coverage = `${row.coverage ?? 0}/${row.totalCities ?? 0}`;
+          return showSector
+            ? `
+              <tr>
+                <td>${row.label || row.code}</td>
+                <td>${row.sector || row.name || '—'}</td>
+                <td>${formatPercent(row.average)}</td>
+                <td>${coverage}</td>
+              </tr>`
+            : `
+              <tr>
+                <td>${row.label || row.name}</td>
+                <td>${formatPercent(row.average)}</td>
+                <td>${coverage}</td>
+              </tr>`;
+        })
+        .join('');
+
+      return `
+        <table class="ville92-table">
+          <thead>
+            <tr>${header}</tr>
+          </thead>
+          <tbody>${body}</tbody>
+        </table>`;
+    }
+
+    function renderVille92Aggregates(metrics, message = '') {
+      if (!ville92Subsector || !ville92Sector) return;
+
+      if (!metrics) {
+        const content = `<p class="muted">${message || 'Aucune donnée à afficher.'}</p>`;
+        ville92Subsector.innerHTML = content;
+        ville92Sector.innerHTML = content;
+        return;
+      }
+
+      const { subSectors, sectors } = computeVille92Aggregates(metrics);
+      const subSectorRows = subSectors.map((sub) => ({
+        label: sub.code,
+        sector: sub.sector,
+        average: sub.average,
+        coverage: sub.coverage,
+        totalCities: sub.totalCities,
+      }));
+      const sectorRows = sectors.map((sector) => ({
+        label: sector.name,
+        average: sector.average,
+        coverage: sector.coverage,
+        totalCities: sector.totalCities,
+      }));
+
+      ville92Subsector.innerHTML = buildVille92AggregateTable(subSectorRows, { showSector: true, label: 'Sous-secteur' });
+      ville92Sector.innerHTML = buildVille92AggregateTable(sectorRows, { label: 'Secteur' });
+    }
+
     async function renderVille92() {
       if (!carte92Events.length) {
         ville92Summary.innerHTML = '<p class="muted">Importez des événements pour afficher la carte.</p>';
+        renderVille92Aggregates(null, 'Importez des événements pour afficher les regroupements.');
         return;
       }
 
@@ -2095,6 +2253,7 @@
       const end = combineFiltersToParisDate(ville92Filters.endDate, ville92Filters.endTime);
       if (!start || !end || end < start) {
         ville92Error.textContent = 'La période choisie est invalide.';
+        renderVille92Aggregates(null, 'Sélectionnez une période valide.');
         return;
       }
 
@@ -2102,6 +2261,7 @@
       const totalInterval = Math.max((end - start) / 1000, 0);
       const metrics = buildCarte92Metrics(carte92Events, start, end);
       ville92LastMetrics = metrics;
+      renderVille92Aggregates(metrics);
 
       const geojson = await loadCarte92Geojson();
       const { features, unmatchedCities } = injectMetricsIntoGeojson(geojson, metrics, totalInterval);
