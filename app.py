@@ -11,6 +11,7 @@ import hashlib
 import io
 import json
 import re
+import unicodedata
 import uuid
 from datetime import datetime
 from types import SimpleNamespace
@@ -239,14 +240,44 @@ def to_numeric_extension(series: pd.Series) -> pd.Series:
     return pd.to_numeric(series, errors="coerce")
 
 
-def classify_call_outcome(statuses: pd.Series) -> str:
-    """Classe un appel en Réussi / Abandonné / Échec selon les statuts observés."""
+def normalize_status_text(text: str) -> str:
+    """Normalise un statut d'appel pour des comparaisons robustes."""
 
-    lowered = statuses.dropna().str.lower()
-    if (lowered == "answered").any():
+    lowered = str(text).strip().lower()
+    normalized = unicodedata.normalize("NFKD", lowered)
+    return "".join(ch for ch in normalized if not unicodedata.combining(ch))
+
+
+def classify_call_outcome(statuses: pd.Series) -> str:
+    """Classe un appel en Réussi / Abandonné / Échec selon les statuts observés.
+
+    La détection est tolérante aux libellés anglais/français (Answered/Répondu,
+    No Answer/Non répondu) afin d'éviter de marquer à tort tous les appels comme
+    non répondus.
+    """
+
+    normalized = statuses.dropna().map(normalize_status_text)
+
+    def _is_answered(value: str) -> bool:
+        if not value:
+            return False
+        has_answer_word = "answer" in value or "repondu" in value
+        is_explicitly_unanswered = "no answer" in value or "not answer" in value or "non repon" in value
+        return has_answer_word and not is_explicitly_unanswered
+
+    if normalized.apply(_is_answered).any():
         return "Réussi"
-    if lowered.str.contains("aband").any():
+
+    unanswered_markers = [
+        normalized.str.contains("aband"),
+        normalized.str.contains("no answer"),
+        normalized.str.contains("non repon"),
+        normalized.str.contains("not answer"),
+        normalized.str.contains("missed"),
+    ]
+    if any(marker.any() for marker in unanswered_markers):
         return "Abandonné"
+
     return "Échec"
 
 
@@ -625,11 +656,6 @@ def stats_by_queue(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty or "RetainedQueue" not in df.columns:
         return pd.DataFrame()
 
-    if "Outcome" in df.columns:
-        df = df[df["Outcome"] == "Réussi"]
-        if df.empty:
-            return pd.DataFrame()
-
     df = df.copy()
     if "QueueInvolved" in df.columns:
         df = df[df["QueueInvolved"]]
@@ -644,11 +670,29 @@ def stats_by_queue(df: pd.DataFrame) -> pd.DataFrame:
         & (df["RetainedQueueNum"] >= 800)
         & (df["RetainedQueue"] != "992")
     ]
-    return (
+    if filtered.empty:
+        return pd.DataFrame()
+
+    grouped = (
         filtered.groupby("RetainedQueue")
-        .agg(AnsweredCalls=("Call ID", "count"))
+        .agg(
+            TotalCalls=("Call ID", "count"),
+            AnsweredCalls=("Outcome", lambda x: (x == "Réussi").sum()),
+            AbandonedCalls=("Outcome", lambda x: (x == "Abandonné").sum()),
+        )
         .reset_index()
-        .sort_values("AnsweredCalls", ascending=False)
+    )
+
+    return (
+        grouped.rename(
+            columns={
+                "RetainedQueue": "File d'attente",
+                "TotalCalls": "Nombre d'appels",
+                "AnsweredCalls": "Appels répondus",
+                "AbandonedCalls": "Appels abandonnés",
+            }
+        )
+        .sort_values("Nombre d'appels", ascending=False)
     )
 
 
