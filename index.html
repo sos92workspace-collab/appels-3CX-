@@ -983,11 +983,14 @@
         const direction = (row.DirectionClean || row.Direction || '').toLowerCase();
         const isInbound = direction.includes('inbound');
         const isOutbound = direction.includes('outbound');
+        const extensionCategory = (row.ExtensionCategory || '').toLowerCase();
         const queueValue = Number(row.QueueNumber || row.AgentExt);
         const isQueue = Number.isFinite(queueValue) &&
           queueValue >= QUEUE_EXTENSION_RANGE.start &&
           queueValue <= QUEUE_EXTENSION_RANGE.end;
         const isAnswered = status === 'answered';
+        const isStandard = extensionCategory === 'standard';
+        const answeredByStandard = isAnswered && isStandard;
         const unansweredFlag = status.includes('unanswered') || status.includes('no answer') || status.includes('missed');
         const callTime = row.CallTime instanceof Date ? row.CallTime : row.CallTime ? new Date(row.CallTime) : null;
         const talkingSeconds = Number(row.TalkingSeconds) || 0;
@@ -995,10 +998,11 @@
         const existing = byId.get(callId) || {
           callId,
           answered: false,
+          answeredByStandard: false,
           inbound: false,
           outbound: false,
           isQueue: false,
-          queueUnanswered: false,
+          queuePresent: false,
           talkingSeconds: 0,
           callTime: null,
           date: '',
@@ -1011,8 +1015,9 @@
         existing.inbound = existing.inbound || isInbound;
         existing.outbound = existing.outbound || isOutbound;
         existing.isQueue = existing.isQueue || isQueue;
-        existing.answered = existing.answered || isAnswered;
-        existing.queueUnanswered = existing.queueUnanswered || (isInbound && isQueue && unansweredFlag);
+        existing.queuePresent = existing.queuePresent || isQueue;
+        existing.answeredByStandard = existing.answeredByStandard || answeredByStandard;
+        existing.answered = existing.answeredByStandard;
         existing.talkingSeconds = Math.max(existing.talkingSeconds, talkingSeconds);
 
         if (callTime && (!existing.callTime || callTime < existing.callTime)) {
@@ -1053,7 +1058,7 @@
 
       return Array.from(byId.values()).map((entry) => ({
         ...entry,
-        queueAbandoned: entry.queueUnanswered && !entry.answered,
+        queueAbandoned: entry.queuePresent && !entry.answeredByStandard,
       }));
     }
 
