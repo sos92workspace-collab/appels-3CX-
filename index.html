@@ -934,9 +934,7 @@
 
       selectedDate = null;
 
-      renderKPIs();
       renderSelectionAwareViews();
-      renderDataTable();
     }
 
     function extractSelection(selectEl) {
@@ -1219,11 +1217,11 @@
       };
     }
 
-    function renderKPIs() {
-      const answeredCalls = callAggregates.length;
-      const queueAbandoned = failedCallAggregates.length;
-      const inboundAnsweredCalls = callSummaries.filter((call) => call.inbound && call.answered).length;
-      const outboundStandardCalls = callSummaries.filter((call) => call.outbound && call.standardPresent).length;
+    function renderKPIs(scopedCalls = callSummaries) {
+      const answeredCalls = scopedCalls.filter((call) => call.answered).length;
+      const queueAbandoned = scopedCalls.filter((call) => call.queueAbandoned).length;
+      const inboundAnsweredCalls = scopedCalls.filter((call) => call.inbound && call.answered).length;
+      const outboundStandardCalls = scopedCalls.filter((call) => call.outbound && call.standardPresent).length;
 
       const kpis = [
         { label: 'Appels traités', value: answeredCalls },
@@ -1293,9 +1291,9 @@
       container.innerHTML = html;
     }
 
-    function renderDataTable() {
+    function renderDataTable(rows = filteredData) {
       const seen = new Set();
-      const dataset = filteredData
+      const dataset = rows
         .filter((row, index) => {
           const key = `${row['Call ID'] || '__missing'}|${row.CallTime || row.Date || index}`;
           if (seen.has(key)) return false;
@@ -1357,7 +1355,11 @@
     }
 
     function renderSelectionAwareViews() {
-      const { successCalls, failedCalls, scopedExtensions } = buildScopedAggregates();
+      const scopedCalls = getScopedCalls();
+      const { successCalls, failedCalls, scopedExtensions } = buildScopedAggregates(scopedCalls);
+      const scopedRows = filterRowsBySelectedDate(filteredData);
+
+      renderKPIs(scopedCalls);
 
       renderCategoryTable(standardStats, scopedExtensions.standard || [], {
         answeredLabel: 'Appel traité',
@@ -1372,15 +1374,18 @@
         callsLabel: 'Appels',
       });
 
-      renderDateChart(successCalls, failedCalls);
+      renderDateChart(callAggregates, failedCallAggregates);
       renderHourChart(successCalls, failedCalls);
+      renderDataTable(scopedRows);
     }
 
-    function buildScopedAggregates() {
-      const scopedCalls = selectedDate
+    function getScopedCalls() {
+      return selectedDate
         ? callSummaries.filter((call) => call.date === selectedDate)
         : callSummaries;
+    }
 
+    function buildScopedAggregates(scopedCalls = getScopedCalls()) {
       return {
         successCalls: scopedCalls.filter((call) => call.answered),
         failedCalls: scopedCalls.filter((call) => call.queueAbandoned),
@@ -1406,8 +1411,8 @@
       const formattedDateLabels = dateLabels.map((d) => formatChartDateLabel(d));
       const successData = dateLabels.map((d) => successByDate[d] || 0);
       const failureData = dateLabels.map((d) => failuresByDate[d] || 0);
-      const successColors = dateLabels.map((date) => (date === selectedDate ? '#16a34a' : '#22c55e'));
-      const failureColors = dateLabels.map((date) => (date === selectedDate ? '#fb923c' : '#f97316'));
+      const successColors = dateLabels.map((date) => (date === selectedDate ? '#3b82f6' : '#22c55e'));
+      const failureColors = dateLabels.map((date) => (date === selectedDate ? '#60a5fa' : '#f97316'));
 
       createChart('date-chart', 'bar', {
         labels: formattedDateLabels,
@@ -1471,6 +1476,11 @@
         data,
         options: { responsive: true, plugins: { legend: { display: false } }, ...options },
       });
+    }
+
+    function filterRowsBySelectedDate(rows) {
+      if (!selectedDate) return rows;
+      return rows.filter((row) => getRowDate(row) === selectedDate);
     }
 
     function formatChartDateLabel(value) {
@@ -1583,7 +1593,7 @@
     }
 
     function exportFiltered() {
-      const dataset = filteredData;
+      const dataset = filterRowsBySelectedDate(filteredData);
       if (!dataset.length) return alert('Aucune donnée filtrée à exporter.');
       const headers = Object.keys(dataset[0]);
       const csv = [headers.join(',')].concat(
