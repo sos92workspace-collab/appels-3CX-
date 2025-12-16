@@ -1212,20 +1212,14 @@
     function renderKPIs() {
       const answeredCalls = callAggregates.length;
       const queueAbandoned = failedCallAggregates.length;
-      const outboundFailures = outboundFailureAggregates.length;
-
-      const standardAnswered = callSummaries.filter((call) => call.standardPresent && call.answeredByStandard).length;
-      const standardTotal = standardAnswered + outboundFailures;
-      const queueAnswered = callSummaries.filter((call) => call.queuePresent && call.answered).length;
-      const queueTotal = queueAnswered + queueAbandoned;
-
-      const totalTalk = callAggregates.reduce((sum, c) => sum + (Number(c.talkingSeconds) || 0), 0);
-      const avgTalk = answeredCalls ? totalTalk / answeredCalls : 0;
+      const inboundCalls = callSummaries.filter((call) => call.inbound).length;
+      const outboundStandardCalls = callSummaries.filter((call) => call.outbound && call.standardPresent).length;
 
       const kpis = [
-        { label: 'Appels (standard)', value: standardTotal },
-        { label: "Appels (files d'attente)", value: queueTotal },
-        { label: 'Durée moyenne de conversation (s)', value: avgTalk.toFixed(1) },
+        { label: 'Appels traités', value: answeredCalls },
+        { label: "Nombre d'appels entrants", value: inboundCalls },
+        { label: 'Appels abandonnés', value: queueAbandoned },
+        { label: 'Appels sortants (standard)', value: outboundStandardCalls },
       ];
 
       kpiContainer.innerHTML = kpis
