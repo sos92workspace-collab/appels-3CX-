@@ -269,12 +269,19 @@ def build_aggregated_calls(df: pd.DataFrame) -> pd.DataFrame:
 
     work = df.copy()
     work["AgentExtNum"] = to_numeric_extension(work["AgentExt"])
+    work["FromExtensionNum"] = to_numeric_extension(work["FromExtension"])
     work["ToExtensionNum"] = to_numeric_extension(work["ToExtension"])
 
     def _aggregate_call(call_id: str, group: pd.DataFrame):
         ordered = group.sort_values("Call Time")
 
         outcome = classify_call_outcome(ordered["Status"])
+
+        standard_involved = (
+            ordered["AgentExtNum"].between(100, 130, inclusive="both")
+            | ordered["FromExtensionNum"].between(100, 130, inclusive="both")
+            | ordered["ToExtensionNum"].between(100, 130, inclusive="both")
+        ).any()
 
         answered_agents = ordered[
             (ordered["Status"].str.lower() == "answered")
@@ -285,9 +292,7 @@ def build_aggregated_calls(df: pd.DataFrame) -> pd.DataFrame:
         agent_row = answered_agents.iloc[0] if not answered_agents.empty else None
         fallback_row = agent_row if agent_row is not None else ordered.iloc[0]
 
-        # Recherche de la file pertinente avant le décroché (ou avant la première trace)
-        call_time = fallback_row["Call Time"]
-        queue_candidates = ordered[
+        queue_candidates_all = ordered[
             (
                 (ordered["ToExtensionNum"] >= 800)
                 & (ordered["ToExtensionNum"] != 992)
@@ -297,7 +302,11 @@ def build_aggregated_calls(df: pd.DataFrame) -> pd.DataFrame:
                 == "inbound queue"
             )
         ]
+        queue_involved = not queue_candidates_all.empty
 
+        # Recherche de la file pertinente avant le décroché (ou avant la première trace)
+        call_time = fallback_row["Call Time"]
+        queue_candidates = queue_candidates_all
         if pd.notna(call_time):
             queue_candidates = queue_candidates[queue_candidates["Call Time"] <= call_time]
 
@@ -306,6 +315,7 @@ def build_aggregated_calls(df: pd.DataFrame) -> pd.DataFrame:
         if not queue_candidates.empty:
             last_queue = queue_candidates.iloc[-1]
             queue_value = last_queue.get("ToExtension") or queue_value
+        queue_value_num = to_numeric_extension(pd.Series([queue_value])).iloc[0]
 
         agent_or_fallback = agent_row if agent_row is not None else fallback_row
 
@@ -328,6 +338,9 @@ def build_aggregated_calls(df: pd.DataFrame) -> pd.DataFrame:
             "TalkingSeconds": agent_or_fallback.get("TalkingSeconds"),
             "CallDurationSeconds": agent_or_fallback.get("CallDurationSeconds"),
             "RetainedQueue": queue_value,
+            "RetainedQueueNum": queue_value_num,
+            "StandardInvolved": standard_involved,
+            "QueueInvolved": queue_involved,
         }
 
     records = []
@@ -617,7 +630,20 @@ def stats_by_queue(df: pd.DataFrame) -> pd.DataFrame:
         if df.empty:
             return pd.DataFrame()
 
-    filtered = df[df["RetainedQueue"].notna() & (df["RetainedQueue"] != "992")]
+    df = df.copy()
+    if "QueueInvolved" in df.columns:
+        df = df[df["QueueInvolved"]]
+        if df.empty:
+            return pd.DataFrame()
+
+    if "RetainedQueueNum" not in df.columns:
+        df["RetainedQueueNum"] = to_numeric_extension(df["RetainedQueue"])
+
+    filtered = df[
+        df["RetainedQueueNum"].notna()
+        & (df["RetainedQueueNum"] >= 800)
+        & (df["RetainedQueue"] != "992")
+    ]
     return (
         filtered.groupby("RetainedQueue")
         .agg(AnsweredCalls=("Call ID", "count"))
@@ -1020,7 +1046,14 @@ def render_pilotage_tab():
         )
         return
 
-    successful_calls = aggregated_calls[aggregated_calls["Outcome"] == "Réussi"]
+    standard_calls = aggregated_calls[aggregated_calls.get("StandardInvolved", False)]
+    queue_calls = aggregated_calls[
+        aggregated_calls.get("QueueInvolved", False)
+        & aggregated_calls.get("RetainedQueueNum").notna()
+        & (aggregated_calls.get("RetainedQueueNum") >= 800)
+    ]
+
+    successful_calls = standard_calls[standard_calls["Outcome"] == "Réussi"]
     if successful_calls.empty:
         st.warning(
             "Aucun appel réussi identifié sur la période importée. Les échecs ou abandons "
@@ -1029,7 +1062,9 @@ def render_pilotage_tab():
 
     st.info(
         "Agrégation par Call ID : premier agent Standard qui décroche, "
-        "dernière file rencontrée avant décroché (exclusion de la file 992)."
+        "dernière file rencontrée avant décroché (exclusion de la file 992). Les graphiques et "
+        "statistiques agents ne considèrent que les appels ayant concerné le standard, et les "
+        "statistiques files uniquement les appels passés par une file (extensions ≥ 800)."
     )
 
     st.subheader("Indicateurs clés (appels réussis)")
@@ -1039,12 +1074,18 @@ def render_pilotage_tab():
     st.dataframe(stats_by_agent(successful_calls))
 
     st.subheader("Répartition par files d'attente (appels réussis)")
-    st.dataframe(stats_by_queue(successful_calls))
+    st.dataframe(stats_by_queue(queue_calls))
 
-    render_time_charts(aggregated_calls)
+    render_time_charts(standard_calls)
 
     filtered = apply_filters(aggregated_calls)
-    filtered_successful = filtered[filtered["Outcome"] == "Réussi"]
+    filtered_standard = filtered[filtered.get("StandardInvolved", False)]
+    filtered_queue = filtered[
+        filtered.get("QueueInvolved", False)
+        & filtered.get("RetainedQueueNum").notna()
+        & (filtered.get("RetainedQueueNum") >= 800)
+    ]
+    filtered_successful = filtered_standard[filtered_standard["Outcome"] == "Réussi"]
 
     st.subheader("Indicateurs clés (données filtrées)")
     compute_kpis(filtered_successful)
@@ -1053,9 +1094,9 @@ def render_pilotage_tab():
     st.dataframe(stats_by_agent(filtered_successful))
 
     st.subheader("Répartition par files d'attente (données filtrées)")
-    st.dataframe(stats_by_queue(filtered_successful))
+    st.dataframe(stats_by_queue(filtered_queue))
 
-    render_time_charts(filtered)
+    render_time_charts(filtered_standard)
 
     st.subheader("Données détaillées (appels agrégés après filtres)")
     st.dataframe(filtered_successful.head(500))
