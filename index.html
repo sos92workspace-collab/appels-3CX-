@@ -382,6 +382,7 @@
     let callSummaries = [];
     let callAggregates = [];
     let failedCallAggregates = [];
+    let outboundFailureAggregates = [];
     let extensionAggregates = { standard: [], medecin: [], queue: [], other: [] };
     let charts = {};
     let importLog = [];
@@ -492,6 +493,7 @@
       callSummaries = [];
       callAggregates = [];
       failedCallAggregates = [];
+      outboundFailureAggregates = [];
       extensionAggregates = { standard: [], medecin: [], queue: [], other: [] };
       dataTable.innerHTML = '';
       kpiContainer.innerHTML = '';
@@ -927,6 +929,7 @@
       callSummaries = summarizeCalls(standardEligibleData);
       callAggregates = callSummaries.filter((call) => call.answered);
       failedCallAggregates = callSummaries.filter((call) => call.queueAbandoned);
+      outboundFailureAggregates = callSummaries.filter((call) => call.outboundFailure);
       extensionAggregates = buildExtensionAggregatesFromSummaries(callSummaries);
 
       selectedDate = null;
@@ -991,7 +994,12 @@
         const isAnswered = status === 'answered';
         const isStandard = extensionCategory === 'standard';
         const answeredByStandard = isAnswered && isStandard;
-        const unansweredFlag = status.includes('unanswered') || status.includes('no answer') || status.includes('missed');
+        const unansweredFlag =
+          status.includes('unanswered') ||
+          status.includes('no answer') ||
+          status.includes('missed') ||
+          status.includes('failed');
+        const outboundFailure = isOutbound && unansweredFlag && isStandard;
         const callTime = row.CallTime instanceof Date ? row.CallTime : row.CallTime ? new Date(row.CallTime) : null;
         const talkingSeconds = Number(row.TalkingSeconds) || 0;
 
@@ -999,6 +1007,8 @@
           callId,
           answered: false,
           answeredByStandard: false,
+          outboundFailure: false,
+          standardPresent: false,
           inbound: false,
           outbound: false,
           isQueue: false,
@@ -1016,8 +1026,10 @@
         existing.outbound = existing.outbound || isOutbound;
         existing.isQueue = existing.isQueue || isQueue;
         existing.queuePresent = existing.queuePresent || isQueue;
+        existing.standardPresent = existing.standardPresent || isStandard;
         existing.answeredByStandard = existing.answeredByStandard || answeredByStandard;
-        existing.answered = existing.answeredByStandard;
+        existing.answered = existing.answered || isAnswered;
+        existing.outboundFailure = existing.outboundFailure || outboundFailure;
         existing.talkingSeconds = Math.max(existing.talkingSeconds, talkingSeconds);
 
         if (callTime && (!existing.callTime || callTime < existing.callTime)) {
@@ -1045,7 +1057,11 @@
         }
 
         const hasActor = row.AgentExt || row.QueueTracked;
+        const isStandardRow = (row.ExtensionCategory || '').toLowerCase() === 'standard';
         if (!existing.representativeRow && hasActor) {
+          existing.representativeRow = row;
+        }
+        if (isStandardRow) {
           existing.representativeRow = row;
         }
 
@@ -1058,7 +1074,10 @@
 
       return Array.from(byId.values()).map((entry) => ({
         ...entry,
-        queueAbandoned: entry.queuePresent && !entry.answeredByStandard,
+        answeredByStandard: entry.answeredByStandard,
+        answered: entry.answered,
+        outboundFailure: entry.outboundFailure && !entry.answeredByStandard,
+        queueAbandoned: entry.queuePresent && !entry.answered,
       }));
     }
 
@@ -1067,14 +1086,18 @@
       const failureRows = [];
 
       summaries.forEach((call) => {
-        if (call.answered && call.representativeRow) {
+        if (call.answeredByStandard && call.representativeRow) {
           successRows.push({ ...call.representativeRow, TalkingSeconds: call.talkingSeconds });
-          if (call.queuePresent && call.queueRow) {
+        }
+        if (call.queuePresent && call.queueRow) {
+          if (call.answered) {
             successRows.push({ ...call.queueRow, TalkingSeconds: call.talkingSeconds });
+          } else {
+            failureRows.push({ ...call.queueRow, TalkingSeconds: 0 });
           }
         }
-        if (call.queueAbandoned && call.queueRow) {
-          failureRows.push({ ...call.queueRow, TalkingSeconds: call.talkingSeconds });
+        if (call.outboundFailure && call.representativeRow) {
+          failureRows.push({ ...call.representativeRow, TalkingSeconds: 0 });
         }
       });
 
@@ -1126,10 +1149,10 @@
           talking: 0,
         };
 
-        current.calls = 1;
-        current.answered = 1;
-        current.inbound = isInbound ? 1 : 0;
-        current.outbound = isOutbound ? 1 : 0;
+        current.calls += 1;
+        current.answered += 1;
+        current.inbound += isInbound ? 1 : 0;
+        current.outbound += isOutbound ? 1 : 0;
         current.talking += Number(row.TalkingSeconds) || 0;
         bucket.set(entryKey, current);
       });
@@ -1148,7 +1171,8 @@
           talking: 0,
         };
 
-        current.failures = 1;
+        current.calls += 1;
+        current.failures += 1;
         bucket.set(entryKey, current);
       });
 
@@ -1186,14 +1210,21 @@
     }
 
     function renderKPIs() {
-      const totalSuccess = callAggregates.length;
+      const answeredCalls = callAggregates.length;
       const queueAbandoned = failedCallAggregates.length;
+      const outboundFailures = outboundFailureAggregates.length;
+
+      const standardAnswered = callSummaries.filter((call) => call.standardPresent && call.answeredByStandard).length;
+      const standardTotal = standardAnswered + outboundFailures;
+      const queueAnswered = callSummaries.filter((call) => call.queuePresent && call.answered).length;
+      const queueTotal = queueAnswered + queueAbandoned;
+
       const totalTalk = callAggregates.reduce((sum, c) => sum + (Number(c.talkingSeconds) || 0), 0);
-      const avgTalk = totalSuccess ? totalTalk / totalSuccess : 0;
+      const avgTalk = answeredCalls ? totalTalk / answeredCalls : 0;
 
       const kpis = [
-        { label: 'Appels réussis', value: totalSuccess },
-        { label: "Appels abandonnés (files d'attente)", value: queueAbandoned },
+        { label: 'Appels (standard)', value: standardTotal },
+        { label: "Appels (files d'attente)", value: queueTotal },
         { label: 'Durée moyenne de conversation (s)', value: avgTalk.toFixed(1) },
       ];
 
@@ -1249,7 +1280,7 @@
                     ${showDirectionBreakdown ? `<td>${r.inbound || 0}</td><td>${r.outbound || 0}</td>` : ''}
                     <td><span class="badge success">${r.answered}</span></td>
                     <td><span class="badge warn">${r.failures}</span></td>
-                    <td>${(r.calls ? r.talking / r.calls : 0).toFixed(1)}</td>
+                    <td>${(r.answered ? r.talking / r.answered : 0).toFixed(1)}</td>
                   </tr>`,
               )
               .join('')}
@@ -1325,19 +1356,16 @@
       const { successCalls, failedCalls, scopedExtensions } = buildScopedAggregates();
 
       renderCategoryTable(standardStats, scopedExtensions.standard || [], {
-        answeredLabel: 'Appels réussis',
-        failureLabel: "Abandons (files d'attente)",
-        callsLabel: 'Appels réussis',
+        answeredLabel: 'Répondus',
+        failureLabel: "Échecs sortants",
+        callsLabel: 'Appels',
         showDirectionBreakdown: true,
       });
-      const queueRows = (scopedExtensions.queue || []).map((row) => ({
-        ...row,
-        answered: row.calls,
-      }));
 
-      renderCategoryTable(queueStats, queueRows, {
+      renderCategoryTable(queueStats, scopedExtensions.queue || [], {
+        answeredLabel: 'Répondus',
         failureLabel: "Abandons (files d'attente)",
-        callsLabel: 'Appels réussis',
+        callsLabel: 'Appels',
       });
 
       renderDateChart(successCalls, failedCalls);
@@ -1381,7 +1409,7 @@
         labels: formattedDateLabels,
         datasets: [
           {
-            label: 'Appels réussis',
+            label: 'Appels',
             data: successData,
             backgroundColor: successColors,
             borderColor: successColors,
@@ -1425,7 +1453,7 @@
       createChart('hour-chart', 'bar', {
         labels: Array.from({ length: 24 }, (_, i) => `${i}h`),
         datasets: [
-          { label: 'Appels réussis', data: successByHour, backgroundColor: '#22c55e', stack: 'calls' },
+          { label: 'Appels', data: successByHour, backgroundColor: '#22c55e', stack: 'calls' },
           { label: "Appels abandonnés (files d'attente)", data: failuresByHour, backgroundColor: '#f97316', stack: 'calls' },
         ],
       }, { scales: { x: { stacked: true }, y: { stacked: true } }, plugins: { legend: { display: true } } });
