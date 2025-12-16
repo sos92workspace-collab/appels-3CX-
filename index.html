@@ -1069,6 +1069,9 @@
       summaries.forEach((call) => {
         if (call.answered && call.representativeRow) {
           successRows.push({ ...call.representativeRow, TalkingSeconds: call.talkingSeconds });
+          if (call.queuePresent && call.queueRow) {
+            successRows.push({ ...call.queueRow, TalkingSeconds: call.talkingSeconds });
+          }
         }
         if (call.queueAbandoned && call.queueRow) {
           failureRows.push({ ...call.queueRow, TalkingSeconds: call.talkingSeconds });
