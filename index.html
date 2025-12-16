@@ -1014,6 +1014,8 @@
           isQueue: false,
           queuePresent: false,
           talkingSeconds: 0,
+          standardTalkingSeconds: 0,
+          queueTalkingSeconds: 0,
           callTime: null,
           date: '',
           hour: '',
@@ -1031,6 +1033,12 @@
         existing.answered = existing.answered || isAnswered;
         existing.outboundFailure = existing.outboundFailure || outboundFailure;
         existing.talkingSeconds = Math.max(existing.talkingSeconds, talkingSeconds);
+        if (isStandard) {
+          existing.standardTalkingSeconds = Math.max(existing.standardTalkingSeconds, talkingSeconds);
+        }
+        if (isQueue) {
+          existing.queueTalkingSeconds = Math.max(existing.queueTalkingSeconds, talkingSeconds);
+        }
 
         if (callTime && (!existing.callTime || callTime < existing.callTime)) {
           existing.callTime = callTime;
@@ -1087,11 +1095,13 @@
 
       summaries.forEach((call) => {
         if (call.answeredByStandard && call.representativeRow) {
-          successRows.push({ ...call.representativeRow, TalkingSeconds: call.talkingSeconds });
+          const standardTalkingSeconds = call.standardTalkingSeconds || call.talkingSeconds;
+          successRows.push({ ...call.representativeRow, TalkingSeconds: standardTalkingSeconds });
         }
         if (call.queuePresent && call.queueRow) {
           if (call.answered) {
-            successRows.push({ ...call.queueRow, TalkingSeconds: call.talkingSeconds });
+            const queueTalkingSeconds = call.queueTalkingSeconds || call.talkingSeconds;
+            successRows.push({ ...call.queueRow, TalkingSeconds: queueTalkingSeconds });
           } else {
             failureRows.push({ ...call.queueRow, TalkingSeconds: 0 });
           }
@@ -1212,14 +1222,14 @@
     function renderKPIs() {
       const answeredCalls = callAggregates.length;
       const queueAbandoned = failedCallAggregates.length;
-      const inboundCalls = callSummaries.filter((call) => call.inbound).length;
+      const inboundAnsweredCalls = callSummaries.filter((call) => call.inbound && call.answered).length;
       const outboundStandardCalls = callSummaries.filter((call) => call.outbound && call.standardPresent).length;
 
       const kpis = [
         { label: 'Appels traités', value: answeredCalls },
-        { label: "Nombre d'appels entrants", value: inboundCalls },
-        { label: 'Appels abandonnés', value: queueAbandoned },
+        { label: "Nombre d'appels entrants répondus", value: inboundAnsweredCalls },
         { label: 'Appels sortants (standard)', value: outboundStandardCalls },
+        { label: 'Appels abandonnés', value: queueAbandoned },
       ];
 
       kpiContainer.innerHTML = kpis
@@ -1350,7 +1360,7 @@
       const { successCalls, failedCalls, scopedExtensions } = buildScopedAggregates();
 
       renderCategoryTable(standardStats, scopedExtensions.standard || [], {
-        answeredLabel: 'Répondus',
+        answeredLabel: 'Appel traité',
         failureLabel: "Échecs sortants",
         callsLabel: 'Appels',
         showDirectionBreakdown: true,
