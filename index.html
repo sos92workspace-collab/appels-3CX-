@@ -375,20 +375,11 @@
       return (value || '').toString().trim().toLowerCase();
     }
 
-    function isSuccessfulRow(row) {
-      return normalizeStatus(row?.StatusClean || row?.Status) === 'answered';
-    }
-
-    function isFailedOrAbandonedRow(row) {
-      const status = normalizeStatus(row?.StatusClean || row?.Status);
-      const failureStatuses = ['no answer', 'missed', 'unanswered', 'busy', 'failed', 'abandoned', 'abandonné', 'abandon', 'canceled', 'cancelled'];
-      return failureStatuses.some((flag) => status.includes(flag));
-    }
-
     let rawData = [];
     let filteredData = [];
     let eligibleData = [];
     let standardEligibleData = [];
+    let callSummaries = [];
     let callAggregates = [];
     let failedCallAggregates = [];
     let extensionAggregates = { standard: [], medecin: [], queue: [], other: [] };
@@ -498,6 +489,7 @@
       rawData = [];
       filteredData = [];
       standardEligibleData = [];
+      callSummaries = [];
       callAggregates = [];
       failedCallAggregates = [];
       extensionAggregates = { standard: [], medecin: [], queue: [], other: [] };
@@ -678,6 +670,10 @@
       if (toText.includes('script') || detailText.includes('call script')) return 'Script';
       if (['inbound', 'outbound', 'internal'].includes(dir)) return dir.charAt(0).toUpperCase() + dir.slice(1);
       return 'Autre';
+    }
+
+    function isCallScript(row) {
+      return (row?.CallType || '').toLowerCase() === 'script';
     }
 
     function isoWeek(date) {
@@ -923,15 +919,15 @@
         return queueNumber !== '992' && agentExtension !== '992';
       });
 
-      eligibleData = filteredData.filter((row) => row.AgentDirectionMatch);
+      filteredData = filteredData.filter((row) => !isCallScript(row));
+
+      eligibleData = filteredData.filter((row) => row.AgentDirectionMatch || row.QueueTracked);
       standardEligibleData = filterStandardInvolvedCalls(eligibleData);
 
-      const successfulRows = standardEligibleData.filter(isSuccessfulRow);
-      const failedRows = standardEligibleData.filter(isFailedOrAbandonedRow);
-
-      callAggregates = aggregateCalls(successfulRows);
-      failedCallAggregates = aggregateCalls(failedRows);
-      extensionAggregates = aggregateExtensions(successfulRows, failedRows);
+      callSummaries = summarizeCalls(standardEligibleData);
+      callAggregates = callSummaries.filter((call) => call.answered);
+      failedCallAggregates = callSummaries.filter((call) => call.queueAbandoned);
+      extensionAggregates = buildExtensionAggregatesFromSummaries(callSummaries);
 
       selectedDate = null;
 
@@ -958,62 +954,123 @@
     }
 
     function filterStandardInvolvedCalls(rows) {
-      const standardCallIds = new Set();
+      const relevantCallIds = new Set();
 
       rows.forEach((row, index) => {
         const callId = row['Call ID'] || `__missing_${index}`;
-        if ((row.ExtensionCategory || '').toLowerCase() === 'standard') {
-          standardCallIds.add(callId);
+        const extValue = Number(row.AgentExt || row.QueueNumber);
+        const isStandard = (row.ExtensionCategory || '').toLowerCase() === 'standard';
+        const isQueueRange = Number.isFinite(extValue) &&
+          extValue >= QUEUE_EXTENSION_RANGE.start &&
+          extValue <= QUEUE_EXTENSION_RANGE.end;
+        if (isStandard || isQueueRange) {
+          relevantCallIds.add(callId);
         }
       });
 
       return rows.filter((row, index) => {
         const callId = row['Call ID'] || `__missing_${index}`;
-        return standardCallIds.has(callId);
+        return relevantCallIds.has(callId);
       });
     }
 
-    function aggregateCalls(rows) {
-      const byCall = new Map();
+    function summarizeCalls(rows) {
+      const byId = new Map();
 
       rows.forEach((row, index) => {
         const callId = row['Call ID'] || `__missing_${index}`;
         const status = normalizeStatus(row.StatusClean || row.Status);
+        const direction = (row.DirectionClean || row.Direction || '').toLowerCase();
+        const isInbound = direction.includes('inbound');
+        const isOutbound = direction.includes('outbound');
+        const queueValue = Number(row.QueueNumber || row.AgentExt);
+        const isQueue = Number.isFinite(queueValue) &&
+          queueValue >= QUEUE_EXTENSION_RANGE.start &&
+          queueValue <= QUEUE_EXTENSION_RANGE.end;
         const isAnswered = status === 'answered';
-        const isFailure = isFailedOrAbandonedRow(row);
+        const unansweredFlag = status.includes('unanswered') || status.includes('no answer') || status.includes('missed');
         const callTime = row.CallTime instanceof Date ? row.CallTime : row.CallTime ? new Date(row.CallTime) : null;
-        const callDate = getRowDate(row, callTime);
+        const talkingSeconds = Number(row.TalkingSeconds) || 0;
 
-        const current = byCall.get(callId) || {
+        const existing = byId.get(callId) || {
           callId,
           answered: false,
-          failures: false,
-          talking: 0,
-          ringing: 0,
+          inbound: false,
+          outbound: false,
+          isQueue: false,
+          queueUnanswered: false,
+          talkingSeconds: 0,
           callTime: null,
           date: '',
           hour: '',
           dow: '',
+          representativeRow: null,
+          queueRow: null,
         };
 
-        current.answered = current.answered || isAnswered;
-        current.failures = current.failures || (!current.answered && isFailure);
-        current.talking += Number(row.TalkingSeconds) || 0;
-        current.ringing += Number(row.RingingSeconds) || 0;
+        existing.inbound = existing.inbound || isInbound;
+        existing.outbound = existing.outbound || isOutbound;
+        existing.isQueue = existing.isQueue || isQueue;
+        existing.answered = existing.answered || isAnswered;
+        existing.queueUnanswered = existing.queueUnanswered || (isInbound && isQueue && unansweredFlag);
+        existing.talkingSeconds = Math.max(existing.talkingSeconds, talkingSeconds);
 
-        if (!current.date) current.date = callDate;
-
-        if (callTime && (!current.callTime || callTime < current.callTime)) {
-          current.callTime = callTime;
-          current.date = callDate;
-          current.hour = callTime.getHours();
-          current.dow = callTime.toLocaleDateString('fr-FR', { weekday: 'long' });
+        if (callTime && (!existing.callTime || callTime < existing.callTime)) {
+          existing.callTime = callTime;
+          existing.date = getRowDate(row, callTime);
+          existing.hour = callTime.getHours();
+          existing.dow = callTime.toLocaleDateString('fr-FR', { weekday: 'long' });
         }
 
-        byCall.set(callId, current);
+        if (!existing.date) {
+          existing.date = getRowDate(row, callTime);
+        }
+
+        if (!existing.dow && row.DayOfWeek) {
+          existing.dow = row.DayOfWeek;
+        }
+
+        if (
+          (existing.hour === '' || existing.hour === null || existing.hour === undefined) &&
+          row.Hour !== '' &&
+          row.Hour !== null &&
+          row.Hour !== undefined
+        ) {
+          existing.hour = Number(row.Hour);
+        }
+
+        const hasActor = row.AgentExt || row.QueueTracked;
+        if (!existing.representativeRow && hasActor) {
+          existing.representativeRow = row;
+        }
+
+        if (isQueue && (!existing.queueRow || unansweredFlag)) {
+          existing.queueRow = row;
+        }
+
+        byId.set(callId, existing);
       });
 
-      return Array.from(byCall.values());
+      return Array.from(byId.values()).map((entry) => ({
+        ...entry,
+        queueAbandoned: entry.queueUnanswered && !entry.answered,
+      }));
+    }
+
+    function buildExtensionAggregatesFromSummaries(summaries) {
+      const successRows = [];
+      const failureRows = [];
+
+      summaries.forEach((call) => {
+        if (call.answered && call.representativeRow) {
+          successRows.push({ ...call.representativeRow, TalkingSeconds: call.talkingSeconds });
+        }
+        if (call.queueAbandoned && call.queueRow) {
+          failureRows.push({ ...call.queueRow, TalkingSeconds: call.talkingSeconds });
+        }
+      });
+
+      return aggregateExtensions(successRows, failureRows);
     }
 
     function aggregateExtensions(successRows, failureRows = []) {
@@ -1122,16 +1179,13 @@
 
     function renderKPIs() {
       const totalSuccess = callAggregates.length;
-      const queueAbandoned = (extensionAggregates.queue || []).reduce(
-        (sum, entry) => sum + (entry.failures || 0),
-        0,
-      );
-      const totalTalk = callAggregates.reduce((sum, c) => sum + (Number(c.talking) || 0), 0);
+      const queueAbandoned = failedCallAggregates.length;
+      const totalTalk = callAggregates.reduce((sum, c) => sum + (Number(c.talkingSeconds) || 0), 0);
       const avgTalk = totalSuccess ? totalTalk / totalSuccess : 0;
 
       const kpis = [
         { label: 'Appels réussis', value: totalSuccess },
-        { label: 'Appels abandonnés / en échec', value: queueAbandoned },
+        { label: "Appels abandonnés (files d'attente)", value: queueAbandoned },
         { label: 'Durée moyenne de conversation (s)', value: avgTalk.toFixed(1) },
       ];
 
@@ -1264,7 +1318,7 @@
 
       renderCategoryTable(standardStats, scopedExtensions.standard || [], {
         answeredLabel: 'Appels réussis',
-        failureLabel: 'Échecs / abandons',
+        failureLabel: "Abandons (files d'attente)",
         callsLabel: 'Appels réussis',
         showDirectionBreakdown: true,
       });
@@ -1274,7 +1328,7 @@
       }));
 
       renderCategoryTable(queueStats, queueRows, {
-        failureLabel: 'Appels perdus',
+        failureLabel: "Abandons (files d'attente)",
         callsLabel: 'Appels réussis',
       });
 
@@ -1283,17 +1337,14 @@
     }
 
     function buildScopedAggregates() {
-      if (!selectedDate) {
-        return { successCalls: callAggregates, failedCalls: failedCallAggregates, scopedExtensions: extensionAggregates };
-      }
+      const scopedCalls = selectedDate
+        ? callSummaries.filter((call) => call.date === selectedDate)
+        : callSummaries;
 
-      const scopedRows = standardEligibleData.filter((row) => getRowDate(row) === selectedDate);
-      const scopedSuccessRows = scopedRows.filter(isSuccessfulRow);
-      const scopedFailureRows = scopedRows.filter(isFailedOrAbandonedRow);
       return {
-        successCalls: aggregateCalls(scopedSuccessRows),
-        failedCalls: aggregateCalls(scopedFailureRows),
-        scopedExtensions: aggregateExtensions(scopedSuccessRows, scopedFailureRows),
+        successCalls: scopedCalls.filter((call) => call.answered),
+        failedCalls: scopedCalls.filter((call) => call.queueAbandoned),
+        scopedExtensions: buildExtensionAggregatesFromSummaries(scopedCalls),
       };
     }
 
@@ -1330,7 +1381,7 @@
             stack: 'calls',
           },
           {
-            label: 'Échecs / abandons',
+            label: "Appels abandonnés (files d'attente)",
             data: failureData,
             backgroundColor: failureColors,
             borderColor: failureColors,
@@ -1367,7 +1418,7 @@
         labels: Array.from({ length: 24 }, (_, i) => `${i}h`),
         datasets: [
           { label: 'Appels réussis', data: successByHour, backgroundColor: '#22c55e', stack: 'calls' },
-          { label: 'Échecs / abandons', data: failuresByHour, backgroundColor: '#f97316', stack: 'calls' },
+          { label: "Appels abandonnés (files d'attente)", data: failuresByHour, backgroundColor: '#f97316', stack: 'calls' },
         ],
       }, { scales: { x: { stacked: true }, y: { stacked: true } }, plugins: { legend: { display: true } } });
     }
