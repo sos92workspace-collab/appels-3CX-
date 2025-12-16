@@ -7,8 +7,19 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet" />
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-o9N1j7kP6+R2zHob6hJ0u06tR7cqp2p3p3p3v5A4o="
+    crossorigin=""
+  />
   <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+  <script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-o9N1j7kP6+R2zHob6hJ0u06tR7cqp2p3p3p3v5A4o="
+    crossorigin=""
+  ></script>
   <style>
     :root {
       color-scheme: light dark;
@@ -152,6 +163,17 @@
     .stats-row.stats-charts { padding-top: 1.25rem; }
     .tab-content { display: none; }
     .tab-content.active { display: block; }
+    .map-card { background: #0b1221; border: 1px solid var(--border); border-radius: 12px; padding: 0.5rem; }
+    #ville92-map { width: 100%; height: 520px; border-radius: 8px; }
+    .legend { display: flex; align-items: center; gap: 0.5rem; color: var(--muted); margin-top: 0.5rem; flex-wrap: wrap; }
+    .legend span { display: inline-flex; align-items: center; gap: 0.35rem; }
+    .legend .swatch { width: 18px; height: 10px; border-radius: 4px; display: inline-block; border: 1px solid var(--border); }
+    .ville92-actions { display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: flex-end; }
+    .ville92-actions button { width: auto; }
+    .ville92-table { width: 100%; border-collapse: collapse; margin-top: 0.75rem; }
+    .ville92-table th, .ville92-table td { padding: 0.5rem 0.65rem; border-bottom: 1px solid var(--border); text-align: left; }
+    .ville92-table th { color: var(--muted); font-weight: 700; }
+    .ville92-error { color: #f87171; margin: 0.35rem 0 0; }
     @media (max-width: 820px) { .brand { flex-direction: column; align-items: flex-start; } }
     @media (max-width: 780px) { .kpi-grid { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); } }
     @media (max-width: 680px) { header { position: static; } }
@@ -170,6 +192,7 @@
   <nav class="tabs">
     <button class="tab-button active" data-tab-target="pilotage">Pilotage</button>
     <button class="tab-button" data-tab-target="import">Import</button>
+    <button class="tab-button" data-tab-target="ville92">Ville 92</button>
   </nav>
 
   <main>
@@ -272,6 +295,55 @@
       </div>
       <div id="data-table"></div>
     </section>
+
+    <section class="tab-content" data-tab="ville92">
+      <h2>Ville 92</h2>
+      <p class="muted">
+        Analyse des événements <code>trafic_changement_carte_92_events</code> : taux d'ouverture/fermeture par commune
+        des Hauts-de-Seine (92).
+      </p>
+      <div class="grid">
+        <div class="chip">
+          <label for="ville92-file">Importer un CSV trafic_changement_carte_92</label>
+          <input id="ville92-file" type="file" accept=".csv" />
+          <p class="muted" style="margin:0.5rem 0 0" id="ville92-import-status">Aucun événement importé.</p>
+        </div>
+        <div class="chip">
+          <label>Filtrer la période (Europe/Paris)</label>
+          <div class="filters-grid" style="padding:0">
+            <div>
+              <label for="ville92-start-date">Date de début</label>
+              <input id="ville92-start-date" type="date" required />
+            </div>
+            <div>
+              <label for="ville92-end-date">Date de fin</label>
+              <input id="ville92-end-date" type="date" required />
+            </div>
+            <div>
+              <label for="ville92-start-time">Heure de début</label>
+              <input id="ville92-start-time" type="time" value="00:00" />
+            </div>
+            <div>
+              <label for="ville92-end-time">Heure de fin</label>
+              <input id="ville92-end-time" type="time" value="23:59" />
+            </div>
+          </div>
+          <div class="ville92-actions">
+            <button id="ville92-apply" class="primary" type="button">Appliquer</button>
+            <button id="ville92-reset" type="button">Réinitialiser</button>
+            <span id="ville92-error" class="ville92-error"></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="map-card" style="margin-top:1rem">
+        <div id="ville92-map"></div>
+        <div class="legend" id="ville92-legend" aria-label="Légende des couleurs"></div>
+      </div>
+
+      <div id="ville92-summary" style="margin-top:1rem"></div>
+      <div id="ville92-unmatched" class="muted"></div>
+    </section>
   </main>
 
   <script>
@@ -293,6 +365,18 @@
     const dataTable = document.getElementById('data-table');
     const saveStatus = document.getElementById('save-status');
     const importList = document.getElementById('import-list');
+    const ville92FileInput = document.getElementById('ville92-file');
+    const ville92ImportStatus = document.getElementById('ville92-import-status');
+    const ville92StartDateInput = document.getElementById('ville92-start-date');
+    const ville92EndDateInput = document.getElementById('ville92-end-date');
+    const ville92StartTimeInput = document.getElementById('ville92-start-time');
+    const ville92EndTimeInput = document.getElementById('ville92-end-time');
+    const ville92ApplyBtn = document.getElementById('ville92-apply');
+    const ville92ResetBtn = document.getElementById('ville92-reset');
+    const ville92Error = document.getElementById('ville92-error');
+    const ville92Summary = document.getElementById('ville92-summary');
+    const ville92Unmatched = document.getElementById('ville92-unmatched');
+    const ville92Legend = document.getElementById('ville92-legend');
 
     const TRACKED_EXTENSIONS = [
       { ext: '100', name: 'Abder Amazit' },
@@ -387,6 +471,12 @@
     let charts = {};
     let importLog = [];
     let selectedDate = null;
+    let carte92Events = [];
+    let carte92Geojson = null;
+    let ville92Map = null;
+    let ville92Layer = null;
+    let ville92LastMetrics = null;
+    let ville92Filters = { startDate: '', endDate: '', startTime: '00:00', endTime: '23:59' };
 
     const DB_NAME = 'appels3cx-db';
     const DB_VERSION = 1;
@@ -397,6 +487,9 @@
     document.getElementById('export-btn').addEventListener('click', exportFiltered);
     document.getElementById('clear-local').addEventListener('click', clearIndexedDB);
     tabButtons.forEach((btn) => btn.addEventListener('click', () => switchTab(btn.dataset.tabTarget)));
+    ville92FileInput?.addEventListener('change', (event) => handleCarte92Files(event.target.files));
+    ville92ApplyBtn?.addEventListener('click', applyVille92Filters);
+    ville92ResetBtn?.addEventListener('click', resetVille92Filters);
 
     const dropzone = document.querySelector('.dropzone');
     dropzone.addEventListener('click', () => fileInput.click());
@@ -1486,6 +1579,7 @@
     function switchTab(target) {
       tabButtons.forEach((btn) => btn.classList.toggle('active', btn.dataset.tabTarget === target));
       tabSections.forEach((section) => section.classList.toggle('active', section.dataset.tab === target));
+      if (target === 'ville92' && carte92Events.length) renderVille92();
     }
 
     function loadImportLog() {
@@ -1596,6 +1690,445 @@
       a.download = 'appels_filtrés.csv';
       a.click();
       URL.revokeObjectURL(url);
+    }
+
+    function normalizeCityLabel(value) {
+      return (value || '').toString().trim().replace(/\s+/g, ' ');
+    }
+
+    function normalizeCityKey(value) {
+      return normalizeCityLabel(value).toLowerCase();
+    }
+
+    function getTimezoneOffset(date, timeZone = 'Europe/Paris') {
+      const dtf = new Intl.DateTimeFormat('en-US', {
+        timeZone,
+        hour12: false,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      });
+
+      const parts = dtf.formatToParts(date).reduce((acc, part) => {
+        if (['year', 'month', 'day', 'hour', 'minute', 'second'].includes(part.type)) acc[part.type] = Number(part.value);
+        return acc;
+      }, {});
+
+      return Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second) - date.getTime();
+    }
+
+    function buildParisDate(year, month, day, hour = 0, minute = 0) {
+      const utcDate = Date.UTC(year, month - 1, day, hour, minute, 0);
+      const guess = new Date(utcDate);
+      const offset = getTimezoneOffset(guess, 'Europe/Paris');
+      return new Date(utcDate - offset);
+    }
+
+    function combineFiltersToParisDate(dateValue, timeValue) {
+      if (!dateValue) return null;
+      const [year, month, day] = dateValue.split('-').map((v) => Number(v));
+      const [hour = 0, minute = 0] = (timeValue || '00:00').split(':').map((v) => Number(v));
+      if ([year, month, day].some((v) => Number.isNaN(v))) return null;
+      return buildParisDate(year, month, day, Number.isFinite(hour) ? hour : 0, Number.isFinite(minute) ? minute : 0);
+    }
+
+    function parseCarte92Date(value) {
+      const text = (value || '').toString().trim();
+      if (!text) return null;
+      const match = text.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})\s+(\d{1,2}):(\d{2})$/);
+      if (!match) return null;
+      const [, d, m, y, hh, mm] = match;
+      const year = y.length === 2 ? 2000 + Number(y) : Number(y);
+      return buildParisDate(year, Number(m), Number(d), Number(hh), Number(mm));
+    }
+
+    function formatDurationLabel(seconds) {
+      if (!seconds || Number.isNaN(seconds)) return '0h00';
+      const totalMinutes = Math.floor(seconds / 60);
+      const hours = Math.floor(totalMinutes / 60);
+      const minutes = totalMinutes % 60;
+      return `${hours}h${String(minutes).padStart(2, '0')}`;
+    }
+
+    function formatInputDate(date) {
+      if (!(date instanceof Date) || Number.isNaN(date)) return '';
+      const y = date.getFullYear();
+      const m = String(date.getMonth() + 1).padStart(2, '0');
+      const d = String(date.getDate()).padStart(2, '0');
+      return `${y}-${m}-${d}`;
+    }
+
+    function handleCarte92Files(files) {
+      if (!files?.length) return;
+      const imports = Array.from(files).map((file) =>
+        parseFile(file)
+          .then((rows) => ({ rows, fileName: file.name }))
+          .catch((error) => {
+            console.error(error);
+            return { rows: [], error: true, fileName: file.name };
+          }),
+      );
+
+      Promise.all(imports).then((items) => {
+        let inserted = 0;
+        let duplicates = 0;
+        let errors = 0;
+
+        items.forEach((item) => {
+          if (item.error) return;
+          const result = ingestCarte92Rows(item.rows, item.fileName);
+          inserted += result.inserted;
+          duplicates += result.duplicates;
+          errors += result.errors.length;
+        });
+
+        const statusParts = [];
+        if (inserted) statusParts.push(`${inserted} événement(s) ajouté(s)`);
+        if (duplicates) statusParts.push(`${duplicates} doublon(s) ignoré(s)`);
+        if (errors) statusParts.push(`${errors} ligne(s) en erreur`);
+        ville92ImportStatus.textContent = statusParts.length
+          ? `${statusParts.join(' – ')}. Total : ${carte92Events.length} événement(s).`
+          : 'Aucun événement ajouté.';
+
+        if (carte92Events.length) {
+          initializeVille92Filters();
+          renderVille92();
+        }
+      });
+    }
+
+    function ingestCarte92Rows(rows, fileName = '') {
+      const normalizedRows = rows.map(normalizeRecord);
+      const existingIds = new Set(carte92Events.map((e) => e.eventId));
+      const seen = new Set(existingIds);
+      const parsed = [];
+      const errors = [];
+      let duplicates = 0;
+
+      normalizedRows.forEach((row, index) => {
+        const createdAt = parseCarte92Date(
+          row['créé le'] || row['cree le'] || row['created_at'] || row['date'] || row['created at'] || row['crééle'],
+        );
+        const cityRaw = row['nom de la ville'] || row.city || row['ville'] || row['nom'] || '';
+        const actionRaw = row.action || row['action'] || '';
+        const sector = row['secteur 92'] || row['secteur'] || '';
+        const operator = row['standardiste'] || row['operateur'] || '';
+
+        if (!createdAt) {
+          errors.push(`Ligne ${index + 2} (${fileName}) : date invalide (${row['créé le'] || row['created_at'] || ''}).`);
+          return;
+        }
+        if (!cityRaw) {
+          errors.push(`Ligne ${index + 2} (${fileName}) : ville manquante.`);
+          return;
+        }
+
+        const city = normalizeCityLabel(cityRaw);
+        const normalizedCity = normalizeCityKey(cityRaw);
+        const actionLower = actionRaw.toString().toLowerCase();
+        let action = '';
+        if (actionLower.includes('ouverture')) action = 'Ouverture';
+        if (actionLower.includes('fermeture')) action = 'Fermeture';
+        if (!action) {
+          errors.push(`Ligne ${index + 2} (${fileName}) : action inconnue (${actionRaw}).`);
+          return;
+        }
+
+        const eventId = `${createdAt.toISOString()}|${city}|${action}|${sector}|${operator}`;
+        if (seen.has(eventId)) {
+          duplicates += 1;
+          return;
+        }
+        seen.add(eventId);
+        parsed.push({
+          eventId,
+          createdAt,
+          city,
+          normalizedCity,
+          action,
+          sector,
+          operator,
+        });
+      });
+
+      carte92Events = carte92Events.concat(parsed).sort((a, b) => a.createdAt - b.createdAt);
+      return { inserted: parsed.length, duplicates, errors };
+    }
+
+    function initializeVille92Filters() {
+      if (!carte92Events.length) return;
+      const times = carte92Events.map((e) => e.createdAt.getTime());
+      const minDate = new Date(Math.min(...times));
+      const maxDate = new Date(Math.max(...times));
+
+      ville92Filters = {
+        startDate: formatInputDate(minDate),
+        endDate: formatInputDate(maxDate),
+        startTime: '00:00',
+        endTime: '23:59',
+      };
+
+      ville92StartDateInput.value = ville92Filters.startDate;
+      ville92EndDateInput.value = ville92Filters.endDate;
+      ville92StartTimeInput.value = ville92Filters.startTime;
+      ville92EndTimeInput.value = ville92Filters.endTime;
+    }
+
+    function resetVille92Filters() {
+      initializeVille92Filters();
+      ville92Error.textContent = '';
+      renderVille92();
+    }
+
+    function applyVille92Filters() {
+      if (!carte92Events.length) {
+        ville92Error.textContent = 'Importez des événements carte 92 pour lancer le calcul.';
+        return;
+      }
+
+      const startDate = ville92StartDateInput.value;
+      const endDate = ville92EndDateInput.value;
+      const startTime = ville92StartTimeInput.value || '00:00';
+      const endTime = ville92EndTimeInput.value || '23:59';
+
+      const start = combineFiltersToParisDate(startDate, startTime);
+      const end = combineFiltersToParisDate(endDate, endTime);
+
+      if (!start || !end) {
+        ville92Error.textContent = 'Dates/horaires invalides : les champs de dates sont obligatoires.';
+        return;
+      }
+
+      if (end < start) {
+        ville92Error.textContent = 'La fin doit être postérieure ou égale au début.';
+        return;
+      }
+
+      ville92Filters = { startDate, endDate, startTime, endTime };
+      ville92Error.textContent = '';
+      renderVille92();
+    }
+
+    async function loadCarte92Geojson() {
+      if (carte92Geojson) return carte92Geojson;
+      try {
+        const response = await fetch('assets/communes-hauts-de-seine.geojson');
+        carte92Geojson = await response.json();
+      } catch (error) {
+        console.error('Impossible de charger le GeoJSON des communes 92', error);
+      }
+      return carte92Geojson || { type: 'FeatureCollection', features: [] };
+    }
+
+    function ensureVille92Map() {
+      if (ville92Map) return;
+      ville92Map = L.map('ville92-map').setView([48.84, 2.25], 10.5);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; OpenStreetMap',
+      }).addTo(ville92Map);
+    }
+
+    function interpolateColor(start, end, t) {
+      const clamped = Math.min(1, Math.max(0, t));
+      const toHex = (value) => value.toString(16).padStart(2, '0');
+      const r = Math.round(start[0] + (end[0] - start[0]) * clamped);
+      const g = Math.round(start[1] + (end[1] - start[1]) * clamped);
+      const b = Math.round(start[2] + (end[2] - start[2]) * clamped);
+      return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+    }
+
+    function buildCarte92Metrics(events, start, end) {
+      const metrics = {};
+      const totalInterval = Math.max((end - start) / 1000, 0);
+      const grouped = events.reduce((acc, event) => {
+        const key = event.normalizedCity;
+        acc[key] = acc[key] || [];
+        acc[key].push(event);
+        return acc;
+      }, {});
+
+      Object.entries(grouped).forEach(([cityKey, cityEvents]) => {
+        const ordered = cityEvents.slice().sort((a, b) => a.createdAt - b.createdAt);
+        const windowEvents = ordered.filter((e) => e.createdAt >= start && e.createdAt <= end);
+        const priorEvents = ordered.filter((e) => e.createdAt < start);
+        const lastPrior = priorEvents.length ? priorEvents[priorEvents.length - 1] : null;
+        let isOpen = lastPrior ? lastPrior.action === 'Ouverture' : false;
+        let cursor = start;
+        let openSeconds = 0;
+
+        windowEvents.forEach((event) => {
+          if (isOpen) openSeconds += (event.createdAt - cursor) / 1000;
+          isOpen = event.action === 'Ouverture';
+          cursor = event.createdAt;
+        });
+
+        if (isOpen) openSeconds += (end - cursor) / 1000;
+
+        metrics[cityKey] = {
+          percentOpen: totalInterval > 0 ? openSeconds / totalInterval : 0,
+          durationOpen: openSeconds,
+          totalInterval,
+          eventCount: windowEvents.length,
+          hasPrior: Boolean(lastPrior),
+          totalEvents: ordered.length,
+          initialState: lastPrior ? (lastPrior.action === 'Ouverture' ? 'open' : 'closed') : 'closed',
+          cityLabel: cityEvents[0]?.city || cityKey,
+        };
+      });
+
+      return metrics;
+    }
+
+    function injectMetricsIntoGeojson(geojson, metrics, totalInterval) {
+      const cityLabels = Object.entries(metrics).reduce((acc, [key, value]) => {
+        acc[key] = value.cityLabel || key;
+        return acc;
+      }, {});
+      const unmatchedCities = new Set(Object.keys(metrics));
+      const features = (geojson?.features || []).map((feature) => {
+        const props = feature.properties || {};
+        const cityName = props.nom || props.name || '';
+        const normalized = normalizeCityKey(cityName);
+        const metric = metrics[normalized] || {
+          percentOpen: 0,
+          durationOpen: 0,
+          totalInterval,
+          eventCount: 0,
+          hasPrior: false,
+          totalEvents: 0,
+          initialState: 'closed',
+        };
+
+        if (metrics[normalized]) unmatchedCities.delete(normalized);
+
+        const percent = Math.max(0, Math.min(1, metric.percentOpen ?? 0));
+        const fillColor = interpolateColor([239, 68, 68], [34, 197, 94], percent);
+        const tooltipLines = [`Ouverture : ${Math.round(percent * 100)}%`];
+
+        if (!metric.totalEvents) {
+          tooltipLines.push('Aucun événement');
+        } else {
+          tooltipLines.push(`Ouvert ${formatDurationLabel(metric.durationOpen)} / ${formatDurationLabel(metric.totalInterval)}`);
+          tooltipLines.push(`${metric.eventCount} événement(s)`);
+          if (!metric.hasPrior) tooltipLines.push('État initial supposé fermé');
+        }
+
+        return {
+          ...feature,
+          properties: {
+            ...props,
+            percentOpen: metric.percentOpen,
+            fillColor,
+            tooltip: [cityName || 'Commune inconnue', ...tooltipLines].join('<br/>'),
+            eventCount: metric.eventCount,
+          },
+        };
+      });
+
+      return { features, unmatchedCities: Array.from(unmatchedCities).map((key) => cityLabels[key] || key) };
+    }
+
+    function renderVille92Legend() {
+      if (!ville92Legend) return;
+      ville92Legend.innerHTML = `
+        <span><span class="swatch" style="background:#ef4444"></span>0% ouvert</span>
+        <span><span class="swatch" style="background:${interpolateColor([239,68,68],[34,197,94],0.5)}"></span>50%</span>
+        <span><span class="swatch" style="background:#22c55e"></span>100% ouvert</span>
+      `;
+    }
+
+    function renderVille92SummaryTable(features) {
+      if (!ville92Summary) return;
+      if (!features.length) {
+        ville92Summary.innerHTML = '<p class="muted">Aucune donnée cartographique disponible.</p>';
+        return;
+      }
+
+      const rows = features
+        .map((feature) => feature.properties || {})
+        .map((props) => ({
+          name: props.nom || props.name || 'Commune',
+          percent: Math.round((props.percentOpen ?? 0) * 100),
+          events: props.eventCount ?? 0,
+          comment: !props.eventCount ? 'Aucun événement' : props.percentOpen === 0 ? 'Fermé sur la période' : '',
+        }))
+        .sort((a, b) => a.name.localeCompare(b.name, 'fr'));
+
+      const html = `
+        <table class="ville92-table">
+          <thead>
+            <tr>
+              <th>Ville</th>
+              <th>% ouverture</th>
+              <th>Événements utilisés</th>
+              <th>Commentaire</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows
+              .map(
+                (row) => `
+                  <tr>
+                    <td>${row.name}</td>
+                    <td>${row.percent}%</td>
+                    <td>${row.events}</td>
+                    <td>${row.comment}</td>
+                  </tr>`,
+              )
+              .join('')}
+          </tbody>
+        </table>`;
+
+      ville92Summary.innerHTML = html;
+    }
+
+    async function renderVille92() {
+      if (!carte92Events.length) {
+        ville92Summary.innerHTML = '<p class="muted">Importez des événements pour afficher la carte.</p>';
+        return;
+      }
+
+      const start = combineFiltersToParisDate(ville92Filters.startDate, ville92Filters.startTime);
+      const end = combineFiltersToParisDate(ville92Filters.endDate, ville92Filters.endTime);
+      if (!start || !end || end < start) {
+        ville92Error.textContent = 'La période choisie est invalide.';
+        return;
+      }
+
+      ensureVille92Map();
+      const totalInterval = Math.max((end - start) / 1000, 0);
+      const metrics = buildCarte92Metrics(carte92Events, start, end);
+      ville92LastMetrics = metrics;
+
+      const geojson = await loadCarte92Geojson();
+      const { features, unmatchedCities } = injectMetricsIntoGeojson(geojson, metrics, totalInterval);
+
+      if (ville92Layer) ville92Map.removeLayer(ville92Layer);
+      ville92Layer = L.geoJSON({ type: 'FeatureCollection', features }, {
+        style: (feature) => ({
+          color: '#475569',
+          weight: 1,
+          fillColor: feature.properties.fillColor || '#9ca3af',
+          fillOpacity: 0.7,
+        }),
+        onEachFeature: (feature, layer) => {
+          const tooltip = feature.properties.tooltip || '';
+          layer.bindTooltip(tooltip, { sticky: true });
+        },
+      }).addTo(ville92Map);
+
+      if (features.length) {
+        const bounds = ville92Layer.getBounds();
+        if (bounds.isValid()) ville92Map.fitBounds(bounds, { padding: [12, 12] });
+      }
+      renderVille92Legend();
+      renderVille92SummaryTable(features);
+      ville92Unmatched.textContent = unmatchedCities.length
+        ? `Villes non matchées avec le GeoJSON : ${unmatchedCities.join(', ')}`
+        : '';
     }
 
     importLog = loadImportLog();
