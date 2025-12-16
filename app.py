@@ -636,43 +636,74 @@ def render_time_charts(df: pd.DataFrame):
     st.subheader("Répartition temporelle")
     work = df.copy()
     work["Outcome"] = work.get("Outcome", "Réussi")
-    work["OutcomeGroup"] = work["Outcome"].apply(
-        lambda value: "Réussi" if value == "Réussi" else "Échec/Abandon"
+
+    def _prepare_outcome_counts(group_col: str, sort_values=None):
+        successful = work[work["Outcome"] == "Réussi"].groupby(group_col).size()
+        failed = work[work["Outcome"] != "Réussi"].groupby(group_col).size()
+
+        combined_index = successful.index.union(failed.index)
+        combined = pd.DataFrame(
+            {
+                "SuccessCount": successful.reindex(combined_index, fill_value=0),
+                "FailureCount": failed.reindex(combined_index, fill_value=0),
+            },
+            index=combined_index,
+        ).reset_index().rename(columns={"index": group_col})
+        combined["TotalCount"] = combined["SuccessCount"] + combined["FailureCount"]
+
+        if sort_values is not None:
+            combined[group_col] = pd.Categorical(combined[group_col], categories=sort_values, ordered=True)
+            combined = combined.sort_values(group_col)
+
+        return combined
+
+    def _stacked_chart(data: pd.DataFrame, x_encoding, title: str):
+        tooltip = [
+            x_encoding,
+            alt.Tooltip("SuccessCount:Q", title="Appels réussis"),
+            alt.Tooltip("FailureCount:Q", title="Échec/Abandon (info)"),
+            alt.Tooltip("TotalCount:Q", title="Total affiché"),
+        ]
+
+        success_layer = alt.Chart(data).mark_bar(color="#2ecc71").encode(
+            x=x_encoding,
+            y=alt.Y("SuccessCount:Q", title="Appels"),
+            tooltip=tooltip,
+        )
+
+        failure_layer = alt.Chart(data).mark_bar(color="#e67e22").encode(
+            x=x_encoding,
+            y=alt.Y("SuccessCount:Q", title="Appels"),
+            y2="TotalCount:Q",
+            tooltip=tooltip,
+        )
+
+        return alt.layer(success_layer, failure_layer).resolve_scale(color="independent").properties(title=title)
+
+    calls_by_date = _prepare_outcome_counts("Date")
+    chart_date = _stacked_chart(
+        calls_by_date,
+        alt.X("Date:T", title="Date"),
+        title="Par date",
     )
 
-    color_scale = alt.Scale(
-        domain=["Réussi", "Échec/Abandon"],
-        range=["#2ecc71", "#e67e22"],
-    )
-
-    calls_by_date = work.groupby(["Date", "OutcomeGroup"]).size().reset_index(name="Count")
-    chart_date = alt.Chart(calls_by_date).mark_bar().encode(
-        x=alt.X("Date:T", title="Date"),
-        y=alt.Y("Count:Q", stack=True, title="Appels"),
-        color=alt.Color("OutcomeGroup:N", scale=color_scale, title="Statut"),
-        tooltip=["Date:T", alt.Tooltip("OutcomeGroup:N", title="Statut"), alt.Tooltip("Count:Q", title="Volume")],
-    )
-
-    calls_by_hour = work.groupby(["Hour", "OutcomeGroup"]).size().reset_index(name="Count")
-    chart_hour = alt.Chart(calls_by_hour).mark_bar().encode(
-        x=alt.X("Hour:O", title="Heure"),
-        y=alt.Y("Count:Q", stack=True, title="Appels"),
-        color=alt.Color("OutcomeGroup:N", scale=color_scale, legend=None),
-        tooltip=["Hour:O", alt.Tooltip("OutcomeGroup:N", title="Statut"), alt.Tooltip("Count:Q", title="Volume")],
+    calls_by_hour = _prepare_outcome_counts("Hour", sort_values=sorted(work["Hour"].dropna().unique()))
+    chart_hour = _stacked_chart(
+        calls_by_hour,
+        alt.X("Hour:O", title="Heure"),
+        title="Par heure",
     )
 
     dow_type = pd.CategoricalDtype(
         categories=["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
         ordered=True,
     )
-    calls_by_dow = work.copy()
-    calls_by_dow["DayOfWeek"] = calls_by_dow["DayOfWeek"].astype(dow_type)
-    calls_by_dow = calls_by_dow.groupby(["DayOfWeek", "OutcomeGroup"]).size().reset_index(name="Count")
-    chart_dow = alt.Chart(calls_by_dow).mark_bar().encode(
-        x=alt.X("DayOfWeek", sort=list(dow_type.categories), title="Jour"),
-        y=alt.Y("Count:Q", stack=True, title="Appels"),
-        color=alt.Color("OutcomeGroup:N", scale=color_scale, legend=None),
-        tooltip=["DayOfWeek:N", alt.Tooltip("OutcomeGroup:N", title="Statut"), alt.Tooltip("Count:Q", title="Volume")],
+    work["DayOfWeek"] = work["DayOfWeek"].astype(dow_type)
+    calls_by_dow = _prepare_outcome_counts("DayOfWeek", sort_values=list(dow_type.categories))
+    chart_dow = _stacked_chart(
+        calls_by_dow,
+        alt.X("DayOfWeek:N", sort=list(dow_type.categories), title="Jour"),
+        title="Par jour de la semaine",
     )
 
     st.altair_chart(chart_date, use_container_width=True)
