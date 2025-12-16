@@ -1018,12 +1018,17 @@
 
       const resolveBucketInfo = (row, index) => {
         const callId = row['Call ID'] || `__missing_${index}`;
-        const ext = row.AgentExt || '';
-        const categoryKey = perCallCategory[row.ExtensionCategory] ? row.ExtensionCategory : 'other';
-        const labelBase =
-          categoryKey === 'queue'
-            ? row.QueueLabel || row.QueueNumber || row.AgentLabel || row.AgentName || ext || 'File inconnue'
-            : row.AgentLabel || row.AgentName || ext || 'Autre / Inconnu';
+        const isQueue = row.QueueTracked;
+        const ext = isQueue ? row.QueueNumber || row.AgentExt || '' : row.AgentExt || '';
+        const categoryKey = isQueue
+          ? 'queue'
+          : perCallCategory[row.ExtensionCategory]
+            ? row.ExtensionCategory
+            : 'other';
+
+        const labelBase = isQueue
+          ? row.QueueLabel || row.QueueNumber || 'File inconnue'
+          : row.AgentLabel || row.AgentName || ext || 'Autre / Inconnu';
         const label = labelBase || 'Autre / Inconnu';
         const bucket = perCallCategory[categoryKey] || perCallCategory.other;
         const entryKey = `${callId}|${ext || label}`;
