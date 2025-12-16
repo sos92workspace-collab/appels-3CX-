@@ -1372,7 +1372,7 @@
         callsLabel: 'Appels',
       });
 
-      renderDateChart(successCalls, failedCalls);
+      renderDateChart();
       renderHourChart(successCalls, failedCalls);
     }
 
@@ -1406,7 +1406,7 @@
       const formattedDateLabels = dateLabels.map((d) => formatChartDateLabel(d));
       const successData = dateLabels.map((d) => successByDate[d] || 0);
       const failureData = dateLabels.map((d) => failuresByDate[d] || 0);
-      const successColors = dateLabels.map((date) => (date === selectedDate ? '#16a34a' : '#22c55e'));
+      const successColors = dateLabels.map((date) => (date === selectedDate ? '#3b82f6' : '#22c55e'));
       const failureColors = dateLabels.map((date) => (date === selectedDate ? '#fb923c' : '#f97316'));
 
       createChart('date-chart', 'bar', {
