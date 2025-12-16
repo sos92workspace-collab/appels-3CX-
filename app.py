@@ -92,11 +92,21 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def normalize_city_name(city: str) -> str:
-    """Normalise le nom d'une ville pour les comparaisons insensibles à la casse."""
+def normalize_city(city: str) -> str:
+    """Normalise le nom d'une ville pour générer une clé robuste.
+
+    - suppression des espaces superflus en début/fin,
+    - réduction des espaces multiples à un seul,
+    - mise en minuscules pour une comparaison insensible à la casse,
+    - conservation des accents.
+    """
 
     normalized = " ".join(str(city).strip().split())
     return normalized.lower()
+
+
+# Compatibilité descendante : certains appels internes utilisaient encore l'ancien nom.
+normalize_city_name = normalize_city
 
 
 def extract_columns_from_bytes(file_bytes: bytes) -> List[str]:
@@ -459,7 +469,7 @@ def parse_trafic_changement_carte_92(
                 "event_id": event_id,
                 "created_at": created_at,
                 "city": city,
-                "normalized_city": normalize_city_name(city),
+                "normalized_city": normalize_city(city),
                 "action": action,
                 "sector_92": sector_92,
                 "operator": operator,
@@ -900,9 +910,6 @@ def normalize_carte92_events(events_df: pd.DataFrame) -> pd.DataFrame:
 
     work = events_df.copy()
 
-    if "created_at" not in work.columns and "Créé le" in work.columns:
-        work["created_at"] = work["Créé le"]
-
     def _to_paris_datetime(value):
         if isinstance(value, pd.Timestamp):
             value = value.to_pydatetime()
@@ -912,11 +919,24 @@ def normalize_carte92_events(events_df: pd.DataFrame) -> pd.DataFrame:
             return value.astimezone(PARIS_TZ)
         return parse_carte92_datetime(value)
 
-    work["created_at"] = work.get("created_at", pd.Series(dtype=object)).apply(_to_paris_datetime)
+    date_source = None
+    if "Créé le" in work.columns:
+        date_source = work["Créé le"]
+    elif "created_at" in work.columns:
+        date_source = work["created_at"]
+    else:
+        date_source = pd.Series(dtype=object)
+
+    work["created_at"] = date_source.apply(_to_paris_datetime)
     work = work.dropna(subset=["created_at"])
 
-    if "normalized_city" not in work.columns and "Nom de la ville" in work.columns:
-        work["normalized_city"] = work["Nom de la ville"].apply(normalize_city_name)
+    if "normalized_city" not in work.columns:
+        if "Nom de la ville" in work.columns:
+            work["normalized_city"] = work["Nom de la ville"].apply(normalize_city)
+        elif "city" in work.columns:
+            work["normalized_city"] = work["city"].apply(normalize_city)
+        elif "Ville" in work.columns:
+            work["normalized_city"] = work["Ville"].apply(normalize_city)
 
     return work
 
@@ -925,15 +945,6 @@ def compute_open_percentage_for_city(
     city_events: pd.DataFrame, start_dt: datetime, end_dt: datetime
 ) -> dict:
     """Calcule les métriques d'ouverture pour une ville donnée."""
-
-    def _to_paris_datetime(value):
-        if isinstance(value, pd.Timestamp):
-            value = value.to_pydatetime()
-        if isinstance(value, datetime):
-            if value.tzinfo is None:
-                return value.replace(tzinfo=PARIS_TZ)
-            return value.astimezone(PARIS_TZ)
-        return parse_carte92_datetime(value)
 
     if end_dt <= start_dt:
         return {
@@ -944,71 +955,87 @@ def compute_open_percentage_for_city(
             "initial_state": "closed",
             "has_prior": False,
             "total_events": len(city_events),
+            "events_before": 0,
+            "timeline": [],
         }
 
-    total_interval = (end_dt - start_dt).total_seconds()
+    work = normalize_carte92_events(city_events)
 
-    work = city_events.copy()
-    if "created_at" not in work.columns and "Créé le" in work.columns:
-        work["created_at"] = work["Créé le"]
-
-    work["created_at"] = work.get("created_at", pd.Series(dtype=object)).apply(_to_paris_datetime)
-    work = work.dropna(subset=["created_at"])
-
-    ordered = work.sort_values("created_at", kind="mergesort") if not work.empty else pd.DataFrame()
+    ordered = (
+        work.sort_values("created_at", kind="mergesort")
+        if not work.empty
+        else pd.DataFrame(columns=["created_at", "action"])
+    )
     total_events = len(ordered)
     prior_events = ordered[ordered["created_at"] < start_dt] if not ordered.empty else pd.DataFrame()
-    has_prior = not prior_events.empty
-    last_prior = prior_events.iloc[-1] if has_prior else None
-    initial_state = "open" if last_prior is not None and last_prior["action"] == "Ouverture" else "closed"
-
-    window_events = ordered[
+    events_in_window = ordered[
         (ordered["created_at"] >= start_dt) & (ordered["created_at"] <= end_dt)
     ]
 
-    current_state_open = initial_state == "open"
-    current_time = start_dt
+    has_prior = not prior_events.empty
+    last_prior = prior_events.iloc[-1] if has_prior else None
+    last_action = str(last_prior.get("action")) if last_prior is not None else ""
+    initial_state = "open" if last_action == "Ouverture" else "closed"
+
+    cursor = start_dt
+    state = initial_state
     open_seconds = 0.0
+    timeline = []
 
-    for _, event in window_events.iterrows():
+    for _, event in events_in_window.iterrows():
         event_time = event["created_at"]
-        if current_state_open:
-            open_seconds += (event_time - current_time).total_seconds()
+        action_value = str(event.get("action", event.get("Action", ""))).strip()
 
-        current_state_open = event["action"] == "Ouverture"
-        current_time = event_time
+        if event_time > cursor and state == "open":
+            open_seconds += (event_time - cursor).total_seconds()
 
-    if current_state_open:
-        open_seconds += (end_dt - current_time).total_seconds()
+        cursor = event_time
+        state = "open" if action_value == "Ouverture" else "closed"
+        timeline.append({"timestamp": event_time, "action": action_value})
 
+    if end_dt > cursor and state == "open":
+        open_seconds += (end_dt - cursor).total_seconds()
+
+    total_interval = (end_dt - start_dt).total_seconds()
     percent = (open_seconds / total_interval) if total_interval > 0 else 0.0
 
     return {
         "percent_open": percent,
         "duration_open": open_seconds,
         "total_interval": total_interval,
-        "event_count": len(window_events),
+        "event_count": len(events_in_window),
         "initial_state": initial_state,
         "has_prior": has_prior,
         "total_events": total_events,
+        "events_before": len(prior_events),
+        "timeline": timeline,
     }
 
 
-def build_carte92_metrics(events_df: pd.DataFrame, start_dt: datetime, end_dt: datetime) -> dict:
-    """Construit les métriques d'ouverture pour chaque ville importée."""
+def build_carte92_metrics(
+    events_df: pd.DataFrame, start_dt: datetime, end_dt: datetime, reference_cities: Optional[List[str]] = None
+) -> dict:
+    """Construit les métriques d'ouverture pour chaque ville importée ou référencée."""
 
     metrics = {}
-    if events_df.empty:
+    if events_df.empty and not reference_cities:
         return metrics
 
-    # S'assure que la colonne temporelle est bien présente/typée, même si les
-    # données proviennent d'une source brute (ex : colonne « Créé le » en texte).
-    events_df = normalize_carte92_events(events_df)
-    if events_df.empty:
-        return metrics
+    normalized_events = normalize_carte92_events(events_df)
+    city_groups = (
+        {normalized: group for normalized, group in normalized_events.groupby("normalized_city")}
+        if not normalized_events.empty
+        else {}
+    )
 
-    for normalized_city, group in events_df.groupby("normalized_city"):
-        metrics[normalized_city] = compute_open_percentage_for_city(group, start_dt, end_dt)
+    # Utilise le référentiel pour forcer la présence de toutes les villes, sinon
+    # se rabat sur les villes trouvées dans les événements importés.
+    target_cities = reference_cities if reference_cities else list(city_groups.keys())
+
+    for city in target_cities:
+        normalized = normalize_city(city)
+        city_events = city_groups.get(normalized, pd.DataFrame(columns=normalized_events.columns))
+        metrics[normalized] = compute_open_percentage_for_city(city_events, start_dt, end_dt)
     return metrics
 
 
@@ -1034,6 +1061,26 @@ def format_duration(seconds: float) -> str:
     return f"{hours}h{minutes:02d}"
 
 
+def extract_reference_cities(geojson_data: dict, events_df: pd.DataFrame) -> List[str]:
+    """Construit la liste des villes à afficher à partir du référentiel ou des événements."""
+
+    names = set()
+    if geojson_data:
+        for feature in geojson_data.get("features", []):
+            props = feature.get("properties", {})
+            city_name = props.get("nom") or props.get("name") or ""
+            if city_name:
+                names.add(str(city_name).strip())
+
+    if events_df is not None and not events_df.empty:
+        source_cols = ["Nom de la ville", "city", "Ville"]
+        for col in source_cols:
+            if col in events_df.columns:
+                names.update(events_df[col].dropna().astype(str).str.strip())
+
+    return sorted(names)
+
+
 def prepare_geojson_features(
     geojson_data: dict, metrics: dict, total_interval: float
 ) -> Tuple[list, set]:
@@ -1046,7 +1093,7 @@ def prepare_geojson_features(
     for feature in features:
         properties = feature.get("properties", {})
         city_name = properties.get("nom") or properties.get("name") or ""
-        normalized_name = normalize_city_name(city_name)
+        normalized_name = normalize_city(city_name)
         metric = metrics.get(
             normalized_name,
             {
@@ -1348,7 +1395,7 @@ def render_ville92_tab():
         }
         start_dt_test = datetime.combine(start_date, start_time, tzinfo=PARIS_TZ)
         end_dt_test = datetime.combine(end_date, end_time, tzinfo=PARIS_TZ)
-        if end_dt_test < start_dt_test:
+        if end_dt_test <= start_dt_test:
             st.error("La date/heure de fin doit être postérieure ou égale au début.")
         else:
             st.session_state.ville92_filters = proposed_filters
@@ -1364,14 +1411,24 @@ def render_ville92_tab():
     start_dt = datetime.combine(start_date, start_time, tzinfo=PARIS_TZ)
     end_dt = datetime.combine(end_date, end_time, tzinfo=PARIS_TZ)
 
-    if end_dt < start_dt:
+    if end_dt <= start_dt:
         st.error("La date/heure de fin doit être postérieure ou égale au début.")
         return
 
-    metrics = build_carte92_metrics(events, start_dt, end_dt)
-    total_interval = max((end_dt - start_dt).total_seconds(), 0)
+    events_in_window = events[(events["created_at"] >= start_dt) & (events["created_at"] <= end_dt)]
+
+    st.subheader("Contrôles import")
+    col_events = st.columns(2)
+    col_events[0].metric("Événements importés", len(events))
+    col_events[1].metric("Événements dans la fenêtre", len(events_in_window))
 
     geojson_data = load_geojson_92("assets/communes-hauts-de-seine.geojson")
+    reference_cities = extract_reference_cities(geojson_data, events)
+    city_display_map = {normalize_city(name): name for name in reference_cities}
+
+    metrics = build_carte92_metrics(events, start_dt, end_dt, reference_cities)
+    total_interval = (end_dt - start_dt).total_seconds()
+
     features, unmatched_metrics = prepare_geojson_features(geojson_data, metrics, total_interval)
 
     if not features:
@@ -1399,12 +1456,53 @@ def render_ville92_tab():
 
     st.pydeck_chart(pdk.Deck(layers=[layer], initial_view_state=view_state, tooltip=tooltip))
 
+    debug_options = reference_cities or [city_display_map.get(key, key.title()) for key in metrics.keys()]
+    if debug_options:
+        default_city = "Châtillon" if "Châtillon" in debug_options else debug_options[0]
+        debug_city = st.selectbox("Diagnostiquez une ville", options=debug_options, index=debug_options.index(default_city))
+        normalized_debug = normalize_city(debug_city)
+        debug_metric = metrics.get(normalized_debug, {})
+        debug_timeline = debug_metric.get("timeline", [])
+        st.caption(
+            f"Durée ouverte calculée : {format_duration(debug_metric.get('duration_open', 0.0))} / "
+            f"{format_duration(debug_metric.get('total_interval', total_interval))} · "
+            f"% ouverture : {round(debug_metric.get('percent_open', 0) * 100)}% · "
+            f"Événements considérés : {debug_metric.get('event_count', 0)}"
+        )
+        if debug_timeline:
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "Horodatage": ts["timestamp"].strftime("%d/%m/%Y %H:%M"),
+                            "Action": ts["action"],
+                        }
+                        for ts in debug_timeline
+                    ]
+                )
+            )
+        else:
+            st.info("Aucun événement dans la fenêtre sélectionnée pour cette ville.")
+
     st.subheader("Synthèse par ville")
     rows = []
-    for feature in features:
-        props = feature.get("properties", {})
-        name = props.get("nom") or props.get("name") or "Inconnue"
-        normalized_name = normalize_city_name(name)
+    table_cities = reference_cities or [city_display_map.get(key, key.title()) for key in metrics.keys()]
+
+    def _display_name_for(normalized_key: str) -> str:
+        if normalized_key in city_display_map:
+            return city_display_map[normalized_key]
+        if "normalized_city" in events.columns:
+            city_rows = events[events["normalized_city"] == normalized_key]
+        else:
+            city_rows = pd.DataFrame()
+        if not city_rows.empty:
+            for candidate_col in ["Nom de la ville", "city", "Ville"]:
+                if candidate_col in city_rows.columns and pd.notna(city_rows.iloc[0].get(candidate_col)):
+                    return str(city_rows.iloc[0].get(candidate_col))
+        return normalized_key.title()
+
+    for city_name in table_cities:
+        normalized_name = normalize_city(city_name)
         metric = metrics.get(
             normalized_name,
             {
@@ -1422,11 +1520,26 @@ def render_ville92_tab():
             comment = "Données initiales supposées fermées"
         rows.append(
             {
-                "Ville": name,
+                "Ville": city_name,
                 "% ouverture": round(metric.get("percent_open", 0) * 100),
                 "Événements": metric.get("event_count", 0),
                 "Durée ouverte": format_duration(metric.get("duration_open", 0.0)),
                 "Remarque": comment or "",
+            }
+        )
+
+    # Ajoute les villes détectées dans les métriques mais absentes du référentiel (pour aider au diagnostic).
+    for normalized_name, metric in metrics.items():
+        if normalized_name in [normalize_city(name) for name in table_cities]:
+            continue
+        comment = "Aucun événement" if metric.get("total_events", 0) == 0 else "Données hors référentiel"
+        rows.append(
+            {
+                "Ville": _display_name_for(normalized_name),
+                "% ouverture": round(metric.get("percent_open", 0) * 100),
+                "Événements": metric.get("event_count", 0),
+                "Durée ouverte": format_duration(metric.get("duration_open", 0.0)),
+                "Remarque": comment,
             }
         )
 
