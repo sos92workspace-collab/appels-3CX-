@@ -347,6 +347,14 @@
 
     const trackedExtensionMap = new Map(TRACKED_EXTENSIONS.map((entry) => [entry.ext, entry.name]));
     const trackedQueueMap = new Map(TRACKED_QUEUES.map((entry) => [entry.number, entry]));
+    const QUEUE_EXTENSION_RANGE = { start: 800, end: 880 };
+
+    for (let number = QUEUE_EXTENSION_RANGE.start; number <= QUEUE_EXTENSION_RANGE.end; number += 1) {
+      const key = String(number);
+      if (!trackedQueueMap.has(key)) {
+        trackedQueueMap.set(key, { number: key, label: `File ${key}`, group: '—', associated: '—' });
+      }
+    }
 
     const DIRECTION_LABELS = {
       inbound: 'Appel entrant',
@@ -606,7 +614,7 @@
     }
 
     const trackedExtensionNumbers = TRACKED_EXTENSIONS.map((entry) => entry.ext);
-    const trackedQueueNumbers = TRACKED_QUEUES.map((entry) => entry.number);
+    const trackedQueueNumbers = Array.from(trackedQueueMap.keys());
 
     function extractAgent(direction, from, to) {
       const regex = /([^()]+?)\s*\((\d{2,})\)/;
