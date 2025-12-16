@@ -363,11 +363,26 @@
       waiting: 'En attente',
     };
 
+    function normalizeStatus(value) {
+      return (value || '').toString().trim().toLowerCase();
+    }
+
+    function isSuccessfulRow(row) {
+      return normalizeStatus(row?.StatusClean || row?.Status) === 'answered';
+    }
+
+    function isFailedOrAbandonedRow(row) {
+      const status = normalizeStatus(row?.StatusClean || row?.Status);
+      const failureStatuses = ['no answer', 'missed', 'unanswered', 'busy', 'failed', 'abandoned', 'abandonné', 'abandon', 'canceled', 'cancelled'];
+      return failureStatuses.some((flag) => status.includes(flag));
+    }
+
     let rawData = [];
     let filteredData = [];
     let eligibleData = [];
     let standardEligibleData = [];
     let callAggregates = [];
+    let failedCallAggregates = [];
     let extensionAggregates = { standard: [], medecin: [], queue: [], other: [] };
     let charts = {};
     let importLog = [];
@@ -476,6 +491,7 @@
       filteredData = [];
       standardEligibleData = [];
       callAggregates = [];
+      failedCallAggregates = [];
       extensionAggregates = { standard: [], medecin: [], queue: [], other: [] };
       dataTable.innerHTML = '';
       kpiContainer.innerHTML = '';
@@ -902,8 +918,12 @@
       eligibleData = filteredData.filter((row) => row.AgentDirectionMatch);
       standardEligibleData = filterStandardInvolvedCalls(eligibleData);
 
-      callAggregates = aggregateCalls(standardEligibleData);
-      extensionAggregates = aggregateExtensions(standardEligibleData);
+      const successfulRows = standardEligibleData.filter(isSuccessfulRow);
+      const failedRows = standardEligibleData.filter(isFailedOrAbandonedRow);
+
+      callAggregates = aggregateCalls(successfulRows);
+      failedCallAggregates = aggregateCalls(failedRows);
+      extensionAggregates = aggregateExtensions(successfulRows, failedRows);
 
       selectedDate = null;
 
@@ -950,9 +970,9 @@
 
       rows.forEach((row, index) => {
         const callId = row['Call ID'] || `__missing_${index}`;
-        const status = (row.StatusClean || '').toLowerCase();
+        const status = normalizeStatus(row.StatusClean || row.Status);
         const isAnswered = status === 'answered';
-        const isFailure = ['no answer', 'missed', 'unanswered', 'busy', 'failed'].includes(status);
+        const isFailure = isFailedOrAbandonedRow(row);
         const callTime = row.CallTime instanceof Date ? row.CallTime : row.CallTime ? new Date(row.CallTime) : null;
         const callDate = getRowDate(row, callTime);
 
@@ -988,7 +1008,7 @@
       return Array.from(byCall.values());
     }
 
-    function aggregateExtensions(rows) {
+    function aggregateExtensions(successRows, failureRows = []) {
       const perCallCategory = {
         standard: new Map(),
         medecin: new Map(),
@@ -996,28 +1016,30 @@
         other: new Map(),
       };
 
-      rows.forEach((row, index) => {
+      const resolveBucketInfo = (row, index) => {
         const callId = row['Call ID'] || `__missing_${index}`;
-        const status = (row.StatusClean || '').toLowerCase();
-        const isAnswered = status === 'answered';
-        const isFailure = ['no answer', 'missed', 'unanswered', 'busy', 'failed'].includes(status);
-        const direction = (row.DirectionClean || '').toLowerCase();
-        const isInbound = direction.includes('inbound');
-        const isOutbound = direction.includes('outbound');
-
         const ext = row.AgentExt || '';
-        const category = perCallCategory[row.ExtensionCategory] ? row.ExtensionCategory : 'other';
-        const baseLabel =
-          category === 'queue'
+        const categoryKey = perCallCategory[row.ExtensionCategory] ? row.ExtensionCategory : 'other';
+        const labelBase =
+          categoryKey === 'queue'
             ? row.QueueLabel || row.QueueNumber || row.AgentLabel || row.AgentName || ext || 'File inconnue'
             : row.AgentLabel || row.AgentName || ext || 'Autre / Inconnu';
-        const keyLabel = baseLabel || 'Autre / Inconnu';
-        const bucket = perCallCategory[category] || perCallCategory.other;
-        const entryKey = `${callId}|${ext || keyLabel}`;
+        const label = labelBase || 'Autre / Inconnu';
+        const bucket = perCallCategory[categoryKey] || perCallCategory.other;
+        const entryKey = `${callId}|${ext || label}`;
+
+        return { bucket, entryKey, ext, label };
+      };
+
+      successRows.forEach((row, index) => {
+        const direction = normalizeStatus(row.DirectionClean || row.Direction);
+        const isInbound = direction.includes('inbound');
+        const isOutbound = direction.includes('outbound');
+        const { bucket, entryKey, ext, label } = resolveBucketInfo(row, index);
 
         const current = bucket.get(entryKey) || {
-          label: keyLabel,
-          ext: ext || keyLabel,
+          label,
+          ext: ext || label,
           calls: 0,
           answered: 0,
           failures: 0,
@@ -1027,11 +1049,28 @@
         };
 
         current.calls = 1;
-        current.answered = current.answered || isAnswered ? 1 : 0;
-        current.failures = current.answered ? 0 : current.failures || isFailure ? 1 : 0;
+        current.answered = 1;
         current.inbound = isInbound ? 1 : 0;
         current.outbound = isOutbound ? 1 : 0;
         current.talking += Number(row.TalkingSeconds) || 0;
+        bucket.set(entryKey, current);
+      });
+
+      failureRows.forEach((row, index) => {
+        const { bucket, entryKey, ext, label } = resolveBucketInfo(row, index);
+
+        const current = bucket.get(entryKey) || {
+          label,
+          ext: ext || label,
+          calls: 0,
+          answered: 0,
+          failures: 0,
+          inbound: 0,
+          outbound: 0,
+          talking: 0,
+        };
+
+        current.failures = 1;
         bucket.set(entryKey, current);
       });
 
@@ -1057,7 +1096,7 @@
           current.talking += entry.talking;
           grouped.set(key, current);
         });
-        return Array.from(grouped.values()).sort((a, b) => b.calls - a.calls);
+        return Array.from(grouped.values()).sort((a, b) => b.calls - a.calls || b.failures - a.failures);
       };
 
       return {
@@ -1069,19 +1108,17 @@
     }
 
     function renderKPIs() {
-      const total = callAggregates.length;
-      const answered = callAggregates.filter((c) => c.answered).length;
+      const totalSuccess = callAggregates.length;
       const queueAbandoned = (extensionAggregates.queue || []).reduce(
         (sum, entry) => sum + (entry.failures || 0),
         0,
       );
       const totalTalk = callAggregates.reduce((sum, c) => sum + (Number(c.talking) || 0), 0);
-      const avgTalk = total ? totalTalk / total : 0;
+      const avgTalk = totalSuccess ? totalTalk / totalSuccess : 0;
 
       const kpis = [
-        { label: 'Appels totaux', value: total },
-        { label: 'Répondus', value: answered },
-        { label: 'Appels abandonnés', value: queueAbandoned },
+        { label: 'Appels réussis', value: totalSuccess },
+        { label: 'Appels abandonnés / en échec', value: queueAbandoned },
         { label: 'Durée moyenne de conversation (s)', value: avgTalk.toFixed(1) },
       ];
 
@@ -1099,7 +1136,12 @@
     function renderCategoryTable(
       container,
       rows,
-      { answeredLabel = 'Répondus', failureLabel = "Échecs d'appel", showDirectionBreakdown = false } = {},
+      {
+        answeredLabel = 'Répondus',
+        failureLabel = "Échecs d'appel",
+        callsLabel = 'Appels',
+        showDirectionBreakdown = false,
+      } = {},
     ) {
       if (!rows.length) {
         container.innerHTML = '<p class="muted">Aucune donnée à afficher.</p>';
@@ -1115,7 +1157,7 @@
           <thead>
             <tr>
               <th>Extension</th>
-              <th>Appels</th>
+              <th>${callsLabel}</th>
               ${directionHeaders}
               <th>${answeredLabel}</th>
               <th>${failureLabel}</th>
@@ -1132,7 +1174,7 @@
                     ${showDirectionBreakdown ? `<td>${r.inbound || 0}</td><td>${r.outbound || 0}</td>` : ''}
                     <td><span class="badge success">${r.answered}</span></td>
                     <td><span class="badge warn">${r.failures}</span></td>
-                    <td>${(r.talking / r.calls || 0).toFixed(1)}</td>
+                    <td>${(r.calls ? r.talking / r.calls : 0).toFixed(1)}</td>
                   </tr>`,
               )
               .join('')}
@@ -1205,57 +1247,82 @@
     }
 
     function renderSelectionAwareViews() {
-      const { scopedCalls, scopedExtensions } = buildScopedAggregates();
+      const { successCalls, failedCalls, scopedExtensions } = buildScopedAggregates();
 
       renderCategoryTable(standardStats, scopedExtensions.standard || [], {
         answeredLabel: 'Appels réussis',
+        failureLabel: 'Échecs / abandons',
+        callsLabel: 'Appels réussis',
         showDirectionBreakdown: true,
       });
       const queueRows = (scopedExtensions.queue || []).map((row) => ({
         ...row,
-        answered: Math.max(0, (row.calls || 0) - (row.failures || 0)),
+        answered: row.calls,
       }));
 
       renderCategoryTable(queueStats, queueRows, {
         failureLabel: 'Appels perdus',
+        callsLabel: 'Appels réussis',
       });
 
-      renderDateChart(callAggregates);
-      renderHourChart(scopedCalls);
+      renderDateChart(successCalls, failedCalls);
+      renderHourChart(successCalls, failedCalls);
     }
 
     function buildScopedAggregates() {
       if (!selectedDate) {
-        return { scopedCalls: callAggregates, scopedExtensions: extensionAggregates };
+        return { successCalls: callAggregates, failedCalls: failedCallAggregates, scopedExtensions: extensionAggregates };
       }
 
       const scopedRows = standardEligibleData.filter((row) => getRowDate(row) === selectedDate);
+      const scopedSuccessRows = scopedRows.filter(isSuccessfulRow);
+      const scopedFailureRows = scopedRows.filter(isFailedOrAbandonedRow);
       return {
-        scopedCalls: aggregateCalls(scopedRows),
-        scopedExtensions: aggregateExtensions(scopedRows),
+        successCalls: aggregateCalls(scopedSuccessRows),
+        failedCalls: aggregateCalls(scopedFailureRows),
+        scopedExtensions: aggregateExtensions(scopedSuccessRows, scopedFailureRows),
       };
     }
 
-    function renderDateChart(sourceAggregates = callAggregates) {
-      const byDate = {};
+    function renderDateChart(successAggregates = callAggregates, failedAggregates = failedCallAggregates) {
+      const successByDate = {};
+      const failuresByDate = {};
 
-      sourceAggregates.forEach((row) => {
-        if (row.date) byDate[row.date] = (byDate[row.date] || 0) + 1;
+      successAggregates.forEach((row) => {
+        if (row.date) successByDate[row.date] = (successByDate[row.date] || 0) + 1;
       });
 
-      const dateLabels = Object.keys(byDate).sort((a, b) => new Date(a) - new Date(b));
+      failedAggregates.forEach((row) => {
+        if (row.date) failuresByDate[row.date] = (failuresByDate[row.date] || 0) + 1;
+      });
+
+      const dateLabels = Array.from(new Set([...Object.keys(successByDate), ...Object.keys(failuresByDate)])).sort(
+        (a, b) => new Date(a) - new Date(b),
+      );
       const formattedDateLabels = dateLabels.map((d) => formatChartDateLabel(d));
-      const dateColors = dateLabels.map((date) => (date === selectedDate ? '#f59e0b' : '#22c55e'));
+      const successData = dateLabels.map((d) => successByDate[d] || 0);
+      const failureData = dateLabels.map((d) => failuresByDate[d] || 0);
+      const successColors = dateLabels.map((date) => (date === selectedDate ? '#16a34a' : '#22c55e'));
+      const failureColors = dateLabels.map((date) => (date === selectedDate ? '#fb923c' : '#f97316'));
 
       createChart('date-chart', 'bar', {
         labels: formattedDateLabels,
         datasets: [
           {
-            label: 'Appels',
-            data: dateLabels.map((d) => byDate[d]),
-            backgroundColor: dateColors,
-            borderColor: dateColors,
+            label: 'Appels réussis',
+            data: successData,
+            backgroundColor: successColors,
+            borderColor: successColors,
             borderWidth: 1.2,
+            stack: 'calls',
+          },
+          {
+            label: 'Échecs / abandons',
+            data: failureData,
+            backgroundColor: failureColors,
+            borderColor: failureColors,
+            borderWidth: 1.2,
+            stack: 'calls',
           },
         ],
       }, {
@@ -1266,20 +1333,30 @@
           selectedDate = selectedDate === clickedDate ? null : clickedDate;
           renderSelectionAwareViews();
         },
+        scales: { x: { stacked: true }, y: { stacked: true } },
+        plugins: { legend: { display: true } },
       });
     }
 
-    function renderHourChart(sourceAggregates = callAggregates) {
-      const byHour = Array(24).fill(0);
+    function renderHourChart(successAggregates = callAggregates, failedAggregates = failedCallAggregates) {
+      const successByHour = Array(24).fill(0);
+      const failuresByHour = Array(24).fill(0);
 
-      sourceAggregates.forEach((row) => {
-        if (row.hour !== '' && row.hour !== null && row.hour !== undefined) byHour[Number(row.hour)] += 1;
+      successAggregates.forEach((row) => {
+        if (row.hour !== '' && row.hour !== null && row.hour !== undefined) successByHour[Number(row.hour)] += 1;
+      });
+
+      failedAggregates.forEach((row) => {
+        if (row.hour !== '' && row.hour !== null && row.hour !== undefined) failuresByHour[Number(row.hour)] += 1;
       });
 
       createChart('hour-chart', 'bar', {
         labels: Array.from({ length: 24 }, (_, i) => `${i}h`),
-        datasets: [{ label: 'Appels', data: byHour, backgroundColor: '#22c55e' }],
-      });
+        datasets: [
+          { label: 'Appels réussis', data: successByHour, backgroundColor: '#22c55e', stack: 'calls' },
+          { label: 'Échecs / abandons', data: failuresByHour, backgroundColor: '#f97316', stack: 'calls' },
+        ],
+      }, { scales: { x: { stacked: true }, y: { stacked: true } }, plugins: { legend: { display: true } } });
     }
 
     function createChart(id, type, data, options = {}) {
