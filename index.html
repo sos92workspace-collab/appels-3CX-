@@ -356,6 +356,12 @@
 
       <div id="ville92-summary" style="margin-top:1rem"></div>
       <div id="ville92-unmatched" class="muted"></div>
+
+      <section style="margin-top:1rem">
+        <h3>Événements importés</h3>
+        <p class="muted">Toutes les lignes importées via l'onglet Ville 92.</p>
+        <div id="ville92-events"></div>
+      </section>
     </section>
   </main>
 
@@ -392,6 +398,7 @@
     const ville92Legend = document.getElementById('ville92-legend');
     const ville92Subsector = document.getElementById('ville92-subsector');
     const ville92Sector = document.getElementById('ville92-sector');
+    const ville92EventsContainer = document.getElementById('ville92-events');
 
     const TRACKED_EXTENSIONS = [
       { ext: '100', name: 'Abder Amazit' },
@@ -1781,6 +1788,11 @@
       return `${hours}h${String(minutes).padStart(2, '0')}`;
     }
 
+    function formatParisDateTime(date) {
+      if (!(date instanceof Date) || Number.isNaN(date)) return '';
+      return date.toLocaleString('fr-FR', { timeZone: 'Europe/Paris' });
+    }
+
     function formatInputDate(date) {
       if (!(date instanceof Date) || Number.isNaN(date)) return '';
       const y = date.getFullYear();
@@ -1879,6 +1891,7 @@
           action,
           sector,
           operator,
+          source: fileName,
         });
       });
 
@@ -2073,23 +2086,56 @@
       return `${percent.toFixed(decimals)}%`;
     }
 
-    function renderVille92SummaryTable(features) {
+    function renderVille92SummaryTable(features, metrics) {
       if (!ville92Summary) return;
-      if (!features.length) {
+
+      const rows = [];
+      const seen = new Set();
+
+      (features || []).forEach((feature) => {
+        const props = feature.properties || {};
+        const name = props.nom || props.name || 'Commune';
+        const normalized = normalizeCityKey(name);
+        const metric = metrics?.[normalized] || {
+          percentOpen: 0,
+          eventCount: 0,
+          totalEvents: 0,
+        };
+
+        const percentValue = Number.isFinite(metric.percentOpen) ? metric.percentOpen : 0;
+        const events = metric.eventCount ?? metric.totalEvents ?? 0;
+        const comment = !events ? 'Aucun événement' : percentValue === 0 ? 'Fermé sur la période' : '';
+
+        rows.push({
+          name,
+          percent: Math.round(percentValue * 100),
+          events,
+          comment,
+        });
+        seen.add(normalizeCityKey(name));
+      });
+
+      if (metrics) {
+        Object.entries(metrics).forEach(([cityKey, metric]) => {
+          if (seen.has(cityKey)) return;
+          const percentValue = Number.isFinite(metric.percentOpen) ? metric.percentOpen : 0;
+          const events = metric.eventCount ?? metric.totalEvents ?? 0;
+          const comment = !events ? 'Aucun événement' : 'Non cartographiée';
+          rows.push({
+            name: metric.cityLabel || cityKey,
+            percent: Math.round(percentValue * 100),
+            events,
+            comment,
+          });
+        });
+      }
+
+      if (!rows.length) {
         ville92Summary.innerHTML = '<p class="muted">Aucune donnée cartographique disponible.</p>';
         return;
       }
 
-      const rows = features
-        .map((feature) => feature.properties || {})
-        .map((props) => ({
-          name: props.nom || props.name || 'Commune',
-          percent: Math.round((props.percentOpen ?? 0) * 100),
-          events: props.eventCount ?? 0,
-          comment: !props.eventCount ? 'Aucun événement' : props.percentOpen === 0 ? 'Fermé sur la période' : '',
-        }))
-        .sort((a, b) => a.name.localeCompare(b.name, 'fr'));
-
+      const sortedRows = rows.sort((a, b) => a.name.localeCompare(b.name, 'fr'));
       const html = `
         <table class="ville92-table">
           <thead>
@@ -2101,7 +2147,7 @@
             </tr>
           </thead>
           <tbody>
-            ${rows
+            ${sortedRows
               .map(
                 (row) => `
                   <tr>
@@ -2116,6 +2162,44 @@
         </table>`;
 
       ville92Summary.innerHTML = html;
+    }
+
+    function renderVille92EventsTable(events) {
+      if (!ville92EventsContainer) return;
+      if (!events?.length) {
+        ville92EventsContainer.innerHTML = '<p class="muted">Importez un CSV pour afficher les lignes importées.</p>';
+        return;
+      }
+
+      const rows = events
+        .slice()
+        .sort((a, b) => (b.createdAt?.getTime?.() || 0) - (a.createdAt?.getTime?.() || 0))
+        .map((event) => `
+          <tr>
+            <td>${formatParisDateTime(event.createdAt)}</td>
+            <td>${event.city}</td>
+            <td>${event.action}</td>
+            <td>${event.sector || '—'}</td>
+            <td>${event.operator || '—'}</td>
+            <td>${event.source || '—'}</td>
+          </tr>
+        `)
+        .join('');
+
+      ville92EventsContainer.innerHTML = `
+        <table class="ville92-table">
+          <thead>
+            <tr>
+              <th>Date (Europe/Paris)</th>
+              <th>Ville</th>
+              <th>Action</th>
+              <th>Secteur 92</th>
+              <th>Standardiste</th>
+              <th>Fichier source</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>`;
     }
 
     function computeVille92Aggregates(metrics) {
@@ -2243,8 +2327,10 @@
     }
 
     async function renderVille92() {
+      renderVille92EventsTable(carte92Events);
       if (!carte92Events.length) {
         ville92Summary.innerHTML = '<p class="muted">Importez des événements pour afficher la carte.</p>';
+        ville92Unmatched.textContent = '';
         renderVille92Aggregates(null, 'Importez des événements pour afficher les regroupements.');
         return;
       }
@@ -2254,6 +2340,7 @@
       if (!start || !end || end < start) {
         ville92Error.textContent = 'La période choisie est invalide.';
         renderVille92Aggregates(null, 'Sélectionnez une période valide.');
+        ville92Unmatched.textContent = '';
         return;
       }
 
@@ -2285,7 +2372,7 @@
         if (bounds.isValid()) ville92Map.fitBounds(bounds, { padding: [12, 12] });
       }
       renderVille92Legend();
-      renderVille92SummaryTable(features);
+      renderVille92SummaryTable(features, metrics);
       ville92Unmatched.textContent = unmatchedCities.length
         ? `Villes non matchées avec le GeoJSON : ${unmatchedCities.join(', ')}`
         : '';
