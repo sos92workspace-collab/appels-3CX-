@@ -649,6 +649,9 @@ def stats_by_agent(df: pd.DataFrame) -> pd.DataFrame:
         TotalRingingSeconds=("RingingSeconds", "sum"),
         AvgRingingSeconds=("RingingSeconds", "mean"),
     ).reset_index()
+
+    result["Temps de parole total"] = result["TotalTalkingSeconds"].fillna(0).apply(format_duration)
+    result["Temps de parole moyen"] = result["AvgTalkingSeconds"].fillna(0).apply(format_duration)
     return result
 
 
@@ -676,27 +679,28 @@ def stats_by_queue(df: pd.DataFrame) -> pd.DataFrame:
     if filtered.empty:
         return pd.DataFrame()
 
-    grouped = (
-        filtered.groupby("RetainedQueue")
-        .agg(
-            TotalCalls=("Call ID", "count"),
-            AnsweredCalls=("AnsweredByStandard", "sum"),
-            AbandonedCalls=("AbandonedInQueue", "sum"),
-        )
-        .reset_index()
-    )
+    def _aggregate_queue(group: pd.DataFrame) -> pd.Series:
+        answered = group[group["AnsweredByStandard"]]
+        talking_series = answered.get("TalkingSeconds", pd.Series(dtype=float)).fillna(0)
+        total_talking = talking_series.sum()
+        avg_talking = talking_series.mean() if not answered.empty else 0.0
 
-    return (
-        grouped.rename(
-            columns={
-                "RetainedQueue": "File d'attente",
-                "TotalCalls": "Nombre d'appels",
-                "AnsweredCalls": "Appels répondus",
-                "AbandonedCalls": "Appels abandonnés",
+        return pd.Series(
+            {
+                "Nombre d'appels": len(group),
+                "Appels répondus": int(group["AnsweredByStandard"].sum()),
+                "Appels abandonnés": int(group["AbandonedInQueue"].sum()),
+                "TotalTalkingSeconds": total_talking,
+                "AvgTalkingSeconds": avg_talking,
+                "Temps de parole total": format_duration(total_talking),
+                "Temps de parole moyen": format_duration(avg_talking),
             }
         )
-        .sort_values("Nombre d'appels", ascending=False)
-    )
+
+    grouped = filtered.groupby("RetainedQueue").apply(_aggregate_queue).reset_index()
+
+    grouped = grouped.rename(columns={"RetainedQueue": "File d'attente"})
+    return grouped.sort_values("Nombre d'appels", ascending=False)
 
 
 def render_time_charts(df: pd.DataFrame):
