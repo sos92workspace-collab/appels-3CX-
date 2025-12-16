@@ -32,6 +32,11 @@ EXPECTED_CARTE92_HEADER = [
     "Secteur 92",
     "Standardiste",
 ]
+STANDARD_EXT_MIN = 100
+STANDARD_EXT_MAX = 130
+QUEUE_EXT_MIN = 800
+QUEUE_EXT_MAX = 880
+CALL_SCRIPT_EXTENSIONS = {992}
 
 
 # -------------------------
@@ -248,51 +253,39 @@ def normalize_status_text(text: str) -> str:
     return "".join(ch for ch in normalized if not unicodedata.combining(ch))
 
 
-def classify_call_outcome(statuses: pd.Series) -> str:
-    """Classe un appel en Réussi / Abandonné / Échec selon les statuts observés.
+def is_answered_status(value: str) -> bool:
+    """Retourne True si un statut correspond à un appel décroché."""
 
-    La détection est tolérante aux libellés anglais/français (Answered/Répondu,
-    No Answer/Non répondu) afin d'éviter de marquer à tort tous les appels comme
-    non répondus.
-    """
+    normalized = normalize_status_text(value)
+    if not normalized:
+        return False
 
-    normalized = statuses.dropna().map(normalize_status_text)
-
-    def _is_answered(value: str) -> bool:
-        if not value:
-            return False
-        has_answer_word = "answer" in value or "repondu" in value
-        is_explicitly_unanswered = "no answer" in value or "not answer" in value or "non repon" in value
-        return has_answer_word and not is_explicitly_unanswered
-
-    if normalized.apply(_is_answered).any():
-        return "Réussi"
-
-    unanswered_markers = [
-        normalized.str.contains("aband"),
-        normalized.str.contains("no answer"),
-        normalized.str.contains("non repon"),
-        normalized.str.contains("not answer"),
-        normalized.str.contains("missed"),
-    ]
-    if any(marker.any() for marker in unanswered_markers):
-        return "Abandonné"
-
-    return "Échec"
+    has_answer_word = "answer" in normalized or "repondu" in normalized
+    explicitly_unanswered = (
+        "no answer" in normalized
+        or "not answer" in normalized
+        or "non repon" in normalized
+        or "missed" in normalized
+    )
+    return has_answer_word and not explicitly_unanswered
 
 
 def build_aggregated_calls(df: pd.DataFrame) -> pd.DataFrame:
-    """Construit une table dédupliquée par Call ID avec agent décroché et file.
+    """Reconstruit chaque appel par Call ID et applique les règles de qualification.
 
-    Règles appliquées (identiques dans tout le code) :
-    - Agent décroché : première ligne Status="Answered" dont l'extension extraite
-      est comprise entre 100 et 130 (Standard), triée par Call Time croissant.
-    - File retenue : dernière file (extension To >= 800 et != 992, ou Direction
-      "Inbound Queue") rencontrée avant le décroché de l'agent (ou avant la
-      première trace du call s'il n'y a pas eu de décroché). À défaut, la valeur
-      "Sans file" est utilisée.
-    - Déduplication : 1 ligne par Call ID pour les appels détectés, qu'ils soient
-      réussis, abandonnés ou en échec.
+    Principes applicatifs issus de l'analyse 3CX :
+    - Le Call ID est l'unité de vérité : toutes les lignes d'un même Call ID sont
+      regroupées avant toute statistique.
+    - Les agents du standard sont les extensions 100 à 130. Un appel est
+      considéré comme **décroché** dès qu'une ligne de ce Call ID indique une
+      prise d'appel par l'une de ces extensions (statut Answered / Répondu).
+    - Les files d'attente sont les extensions 800 à 880. Un appel est
+      **abandonné en file** uniquement s'il est entré dans une file et qu'aucune
+      ligne du Call ID ne montre de prise par un agent du standard. Le statut de
+      la ligne de file est ignoré pour éviter les faux abandons.
+    - Les Call Scripts (ex : extension 992) font partie du parcours et sont
+      conservés pour reconstruire le Call ID, mais ils sont invisibles dans les
+      statistiques : ils ne peuvent ni valider un décroché ni marquer un abandon.
     """
 
     if df.empty:
@@ -303,75 +296,94 @@ def build_aggregated_calls(df: pd.DataFrame) -> pd.DataFrame:
     work["FromExtensionNum"] = to_numeric_extension(work["FromExtension"])
     work["ToExtensionNum"] = to_numeric_extension(work["ToExtension"])
 
+    def _is_standard_ext(series: pd.Series) -> pd.Series:
+        return series.between(STANDARD_EXT_MIN, STANDARD_EXT_MAX, inclusive="both")
+
+    def _is_queue_ext(series: pd.Series) -> pd.Series:
+        return series.between(QUEUE_EXT_MIN, QUEUE_EXT_MAX, inclusive="both")
+
     def _aggregate_call(call_id: str, group: pd.DataFrame):
         ordered = group.sort_values("Call Time")
 
-        outcome = classify_call_outcome(ordered["Status"])
-
-        standard_involved = (
-            ordered["AgentExtNum"].between(100, 130, inclusive="both")
-            | ordered["FromExtensionNum"].between(100, 130, inclusive="both")
-            | ordered["ToExtensionNum"].between(100, 130, inclusive="both")
-        ).any()
-
-        answered_agents = ordered[
-            (ordered["Status"].str.lower() == "answered")
-            & (ordered["AgentExtNum"].between(100, 130, inclusive="both"))
-        ]
-
-        # On retient le premier agent qui décroche (transfert géré en amont).
-        agent_row = answered_agents.iloc[0] if not answered_agents.empty else None
-        fallback_row = agent_row if agent_row is not None else ordered.iloc[0]
-
-        queue_candidates_all = ordered[
-            (
-                (ordered["ToExtensionNum"] >= 800)
-                & (ordered["ToExtensionNum"] != 992)
-            )
+        queue_mask = (
+            _is_queue_ext(ordered["ToExtensionNum"])
             | (
-                ordered["Direction"].str.strip().str.lower()
+                ordered["Direction"].fillna("").str.strip().str.lower()
                 == "inbound queue"
             )
-        ]
-        queue_involved = not queue_candidates_all.empty
+        )
+        queue_rows = ordered[queue_mask]
+        queue_rows = queue_rows[~queue_rows["ToExtensionNum"].isin(CALL_SCRIPT_EXTENSIONS)]
+        has_queue = not queue_rows.empty
 
-        # Recherche de la file pertinente avant le décroché (ou avant la première trace)
-        call_time = fallback_row["Call Time"]
-        queue_candidates = queue_candidates_all
-        if pd.notna(call_time):
-            queue_candidates = queue_candidates[queue_candidates["Call Time"] <= call_time]
+        standard_mask = (
+            _is_standard_ext(ordered["AgentExtNum"])
+            | _is_standard_ext(ordered["ToExtensionNum"])
+            | _is_standard_ext(ordered["FromExtensionNum"])
+        )
+        talking_series = (
+            ordered["TalkingSeconds"]
+            if "TalkingSeconds" in ordered
+            else pd.Series([0] * len(ordered), index=ordered.index)
+        )
+        answered_flag = ordered["Status"].apply(is_answered_status) | (talking_series.fillna(0) > 0)
+        answered_rows = ordered[standard_mask & answered_flag].sort_values("Call Time")
+        answered_by_standard = not answered_rows.empty
 
-        queue_candidates = queue_candidates.sort_values("Call Time")
-        queue_value = "Sans file"
-        if not queue_candidates.empty:
-            last_queue = queue_candidates.iloc[-1]
-            queue_value = last_queue.get("ToExtension") or queue_value
-        queue_value_num = to_numeric_extension(pd.Series([queue_value])).iloc[0]
+        call_scripts_present = (
+            ordered["ToExtensionNum"].isin(CALL_SCRIPT_EXTENSIONS)
+            | ordered["FromExtensionNum"].isin(CALL_SCRIPT_EXTENSIONS)
+        ).any()
 
-        agent_or_fallback = agent_row if agent_row is not None else fallback_row
+        reference_queue_value = "Sans file"
+        reference_queue_num = pd.NA
+        if has_queue:
+            queue_timeline = queue_rows
+            if answered_by_standard:
+                first_answer_time = answered_rows.iloc[0]["Call Time"]
+                queue_timeline = queue_rows[queue_rows["Call Time"] <= first_answer_time]
+
+            queue_timeline = queue_timeline.sort_values("Call Time")
+            if not queue_timeline.empty:
+                reference_queue_value = queue_timeline.iloc[-1].get("ToExtension") or "Sans file"
+                reference_queue_num = to_numeric_extension(pd.Series([reference_queue_value])).iloc[0]
+
+        abandoned_in_queue = has_queue and not answered_by_standard
+        call_outcome = (
+            "Décroché par agent"
+            if answered_by_standard
+            else "Abandonné en file"
+            if has_queue
+            else "Sans agent du standard"
+        )
+
+        call_start_row = ordered.iloc[0]
+        metrics_row = answered_rows.iloc[0] if answered_by_standard else call_start_row
 
         return {
             "Call ID": call_id,
-            "Outcome": outcome,
-            "AgentExt": agent_or_fallback.get("AgentExt"),
-            "AgentName": agent_or_fallback.get("AgentName"),
-            "Direction": agent_or_fallback.get("Direction"),
-            "Status": agent_or_fallback.get("Status"),
-            "CallType": agent_or_fallback.get("CallType"),
-            "Call Time": agent_or_fallback.get("Call Time"),
-            "Date": agent_or_fallback.get("Date"),
-            "Year": agent_or_fallback.get("Year"),
-            "Month": agent_or_fallback.get("Month"),
-            "Week": agent_or_fallback.get("Week"),
-            "DayOfWeek": agent_or_fallback.get("DayOfWeek"),
-            "Hour": agent_or_fallback.get("Hour"),
-            "RingingSeconds": agent_or_fallback.get("RingingSeconds"),
-            "TalkingSeconds": agent_or_fallback.get("TalkingSeconds"),
-            "CallDurationSeconds": agent_or_fallback.get("CallDurationSeconds"),
-            "RetainedQueue": queue_value,
-            "RetainedQueueNum": queue_value_num,
-            "StandardInvolved": standard_involved,
-            "QueueInvolved": queue_involved,
+            "CallOutcome": call_outcome,
+            "AnsweredByStandard": answered_by_standard,
+            "AbandonedInQueue": abandoned_in_queue,
+            "HasQueue": has_queue,
+            "HasCallScript": call_scripts_present,
+            "AgentExt": metrics_row.get("AgentExt"),
+            "AgentName": metrics_row.get("AgentName"),
+            "Direction": call_start_row.get("Direction"),
+            "Status": metrics_row.get("Status"),
+            "CallType": metrics_row.get("CallType"),
+            "Call Time": call_start_row.get("Call Time"),
+            "Date": call_start_row.get("Date"),
+            "Year": call_start_row.get("Year"),
+            "Month": call_start_row.get("Month"),
+            "Week": call_start_row.get("Week"),
+            "DayOfWeek": call_start_row.get("DayOfWeek"),
+            "Hour": call_start_row.get("Hour"),
+            "RingingSeconds": metrics_row.get("RingingSeconds"),
+            "TalkingSeconds": metrics_row.get("TalkingSeconds"),
+            "CallDurationSeconds": metrics_row.get("CallDurationSeconds"),
+            "RetainedQueue": reference_queue_value,
+            "RetainedQueueNum": reference_queue_num,
         }
 
     records = []
@@ -598,29 +610,35 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
 def compute_kpis(df: pd.DataFrame):
     """Calcule les indicateurs clés pour le jeu de données filtré."""
 
-    if "Outcome" in df.columns:
-        df = df[df["Outcome"] == "Réussi"]
+    if df.empty:
+        st.info("Aucune donnée à afficher avec les règles de qualification actuelles.")
+        return
 
+    answered_df = df[df["AnsweredByStandard"]]
     total_calls = len(df)
-    answered_calls = (df["Status"].str.lower() == "answered").sum()
-    missed_calls = df["Status"].str.lower().isin(["no answer", "missed"]).sum()
-    total_talking = df["TalkingSeconds"].sum()
-    total_ringing = df["RingingSeconds"].sum()
-    avg_talking = df["TalkingSeconds"].mean() if total_calls else 0
-    avg_ringing = df["RingingSeconds"].mean() if total_calls else 0
-    distinct_agents = df["AgentExt"].nunique(dropna=True)
+    answered_calls = len(answered_df)
+    abandoned_calls = df["AbandonedInQueue"].sum()
+    distinct_agents = answered_df["AgentExt"].nunique(dropna=True)
+
+    total_talking = answered_df["TalkingSeconds"].sum()
+    total_ringing = answered_df["RingingSeconds"].sum()
+    avg_talking = answered_df["TalkingSeconds"].mean() if answered_calls else 0
+    avg_ringing = answered_df["RingingSeconds"].mean() if answered_calls else 0
 
     cols = st.columns(6)
-    cols[0].metric("Appels réussis", f"{total_calls}")
-    cols[1].metric("Appels répondus", f"{answered_calls}")
-    cols[2].metric("Appels manqués", f"{missed_calls}")
+    cols[0].metric("Appels analysés (Call ID)", f"{total_calls}")
+    cols[1].metric("Appels pris par le standard", f"{answered_calls}")
+    cols[2].metric("Appels abandonnés en file", f"{abandoned_calls}")
     cols[3].metric("Durée totale (talking)", f"{int(total_talking)} s")
     cols[4].metric("Durée totale (ringing)", f"{int(total_ringing)} s")
     cols[5].metric("Durée moyenne (ringing)", f"{avg_ringing:.1f} s")
     st.caption(
-        f"Durée moyenne de conversation: {avg_talking:.1f} s · Agents distincts: {distinct_agents}"
+        f"Durée moyenne de conversation: {avg_talking:.1f} s · Agents distincts (100-130): {distinct_agents}"
     )
-    st.caption("Seuls les appels réussis alimentent ces indicateurs. Les échecs/abandons restent visibles sur les graphiques.")
+    st.caption(
+        "Les indicateurs reposent uniquement sur des Call ID uniques : décroché si un agent 100-130 répond, "
+        "abandon en file sinon lorsqu'une file 800-880 est présente."
+    )
 
 
 def stats_by_agent(df: pd.DataFrame) -> pd.DataFrame:
@@ -629,8 +647,8 @@ def stats_by_agent(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
 
-    if "Outcome" in df.columns:
-        df = df[df["Outcome"] == "Réussi"]
+    if "AnsweredByStandard" in df.columns:
+        df = df[df["AnsweredByStandard"]]
         if df.empty:
             return df
 
@@ -640,8 +658,7 @@ def stats_by_agent(df: pd.DataFrame) -> pd.DataFrame:
         InboundCalls=("Direction", lambda x: (x == "Inbound").sum()),
         OutboundCalls=("Direction", lambda x: (x == "Outbound").sum()),
         InternalCalls=("Direction", lambda x: (x == "Internal").sum()),
-        AnsweredCalls=("Status", lambda x: (x.str.lower() == "answered").sum()),
-        MissedCalls=("Status", lambda x: x.str.lower().isin(["no answer", "missed"]).sum()),
+        AnsweredCalls=("AnsweredByStandard", "sum"),
         TotalTalkingSeconds=("TalkingSeconds", "sum"),
         AvgTalkingSeconds=("TalkingSeconds", "mean"),
         TotalRingingSeconds=("RingingSeconds", "sum"),
@@ -657,8 +674,8 @@ def stats_by_queue(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
 
     df = df.copy()
-    if "QueueInvolved" in df.columns:
-        df = df[df["QueueInvolved"]]
+    if "HasQueue" in df.columns:
+        df = df[df["HasQueue"]]
         if df.empty:
             return pd.DataFrame()
 
@@ -667,8 +684,9 @@ def stats_by_queue(df: pd.DataFrame) -> pd.DataFrame:
 
     filtered = df[
         df["RetainedQueueNum"].notna()
-        & (df["RetainedQueueNum"] >= 800)
-        & (df["RetainedQueue"] != "992")
+        & (df["RetainedQueueNum"] >= QUEUE_EXT_MIN)
+        & (df["RetainedQueueNum"] <= QUEUE_EXT_MAX)
+        & (~df["RetainedQueueNum"].isin(CALL_SCRIPT_EXTENSIONS))
     ]
     if filtered.empty:
         return pd.DataFrame()
@@ -677,8 +695,8 @@ def stats_by_queue(df: pd.DataFrame) -> pd.DataFrame:
         filtered.groupby("RetainedQueue")
         .agg(
             TotalCalls=("Call ID", "count"),
-            AnsweredCalls=("Outcome", lambda x: (x == "Réussi").sum()),
-            AbandonedCalls=("Outcome", lambda x: (x == "Abandonné").sum()),
+            AnsweredCalls=("AnsweredByStandard", "sum"),
+            AbandonedCalls=("AbandonedInQueue", "sum"),
         )
         .reset_index()
     )
@@ -705,21 +723,20 @@ def render_time_charts(df: pd.DataFrame):
 
     st.subheader("Répartition temporelle")
     work = df.copy()
-    work["Outcome"] = work.get("Outcome", "Réussi")
 
-    def _prepare_outcome_counts(group_col: str, sort_values=None):
-        successful = work[work["Outcome"] == "Réussi"].groupby(group_col).size()
-        failed = work[work["Outcome"] != "Réussi"].groupby(group_col).size()
+    def _prepare_counts(group_col: str, sort_values=None):
+        answered = work[work["AnsweredByStandard"]].groupby(group_col).size()
+        abandoned = work[work["AbandonedInQueue"]].groupby(group_col).size()
 
-        combined_index = successful.index.union(failed.index)
+        combined_index = answered.index.union(abandoned.index)
         combined = pd.DataFrame(
             {
-                "SuccessCount": successful.reindex(combined_index, fill_value=0),
-                "FailureCount": failed.reindex(combined_index, fill_value=0),
+                "AnsweredCount": answered.reindex(combined_index, fill_value=0),
+                "AbandonedCount": abandoned.reindex(combined_index, fill_value=0),
             },
             index=combined_index,
         ).reset_index().rename(columns={"index": group_col})
-        combined["TotalCount"] = combined["SuccessCount"] + combined["FailureCount"]
+        combined["TotalCount"] = combined["AnsweredCount"] + combined["AbandonedCount"]
 
         if sort_values is not None:
             combined[group_col] = pd.Categorical(combined[group_col], categories=sort_values, ordered=True)
@@ -730,34 +747,38 @@ def render_time_charts(df: pd.DataFrame):
     def _stacked_chart(data: pd.DataFrame, x_encoding, title: str):
         tooltip = [
             x_encoding,
-            alt.Tooltip("SuccessCount:Q", title="Appels réussis"),
-            alt.Tooltip("FailureCount:Q", title="Échec/Abandon (info)"),
-            alt.Tooltip("TotalCount:Q", title="Total affiché"),
+            alt.Tooltip("AnsweredCount:Q", title="Appels décroché (verts)"),
+            alt.Tooltip("AbandonedCount:Q", title="Appels abandonnés en file (orange)"),
+            alt.Tooltip("TotalCount:Q", title="Total Call ID"),
         ]
 
-        success_layer = alt.Chart(data).mark_bar(color="#2ecc71").encode(
+        answered_layer = alt.Chart(data).mark_bar(color="#2ecc71").encode(
             x=x_encoding,
-            y=alt.Y("SuccessCount:Q", title="Appels"),
+            y=alt.Y("AnsweredCount:Q", title="Appels"),
             tooltip=tooltip,
         )
 
-        failure_layer = alt.Chart(data).mark_bar(color="#e67e22").encode(
+        abandoned_layer = alt.Chart(data).mark_bar(color="#e67e22").encode(
             x=x_encoding,
-            y=alt.Y("SuccessCount:Q", title="Appels"),
+            y=alt.Y("AnsweredCount:Q", title="Appels"),
             y2="TotalCount:Q",
             tooltip=tooltip,
         )
 
-        return alt.layer(success_layer, failure_layer).resolve_scale(color="independent").properties(title=title)
+        return (
+            alt.layer(answered_layer, abandoned_layer)
+            .resolve_scale(color="independent")
+            .properties(title=title)
+        )
 
-    calls_by_date = _prepare_outcome_counts("Date")
+    calls_by_date = _prepare_counts("Date")
     chart_date = _stacked_chart(
         calls_by_date,
         alt.X("Date:T", title="Date"),
         title="Par date",
     )
 
-    calls_by_hour = _prepare_outcome_counts("Hour", sort_values=sorted(work["Hour"].dropna().unique()))
+    calls_by_hour = _prepare_counts("Hour", sort_values=sorted(work["Hour"].dropna().unique()))
     chart_hour = _stacked_chart(
         calls_by_hour,
         alt.X("Hour:O", title="Heure"),
@@ -769,7 +790,7 @@ def render_time_charts(df: pd.DataFrame):
         ordered=True,
     )
     work["DayOfWeek"] = work["DayOfWeek"].astype(dow_type)
-    calls_by_dow = _prepare_outcome_counts("DayOfWeek", sort_values=list(dow_type.categories))
+    calls_by_dow = _prepare_counts("DayOfWeek", sort_values=list(dow_type.categories))
     chart_dow = _stacked_chart(
         calls_by_dow,
         alt.X("DayOfWeek:N", sort=list(dow_type.categories), title="Jour"),
@@ -1090,62 +1111,57 @@ def render_pilotage_tab():
         )
         return
 
-    standard_calls = aggregated_calls[aggregated_calls.get("StandardInvolved", False)]
-    queue_calls = aggregated_calls[
-        aggregated_calls.get("QueueInvolved", False)
-        & aggregated_calls.get("RetainedQueueNum").notna()
-        & (aggregated_calls.get("RetainedQueueNum") >= 800)
+    scoped_calls = aggregated_calls[
+        aggregated_calls["AnsweredByStandard"] | aggregated_calls["HasQueue"]
     ]
 
-    successful_calls = standard_calls[standard_calls["Outcome"] == "Réussi"]
-    if successful_calls.empty:
+    if scoped_calls.empty:
         st.warning(
-            "Aucun appel réussi identifié sur la période importée. Les échecs ou abandons "
-            "sont tout de même visibles dans les graphiques (barres orange)."
+            "Aucun Call ID ne correspond aux règles (file 800-880 ou agent 100-130). "
+            "Vérifiez vos données."
+        )
+        return
+
+    if not scoped_calls["AnsweredByStandard"].any():
+        st.warning(
+            "Aucun appel décroché par le standard (extensions 100-130) n'a été détecté sur la période importée."
         )
 
     st.info(
-        "Agrégation par Call ID : premier agent Standard qui décroche, "
-        "dernière file rencontrée avant décroché (exclusion de la file 992). Les graphiques et "
-        "statistiques agents ne considèrent que les appels ayant concerné le standard, et les "
-        "statistiques files uniquement les appels passés par une file (extensions ≥ 800)."
+        "Toutes les statistiques sont calculées par Call ID unique : regroupement des lignes, "
+        "agents du standard = extensions 100-130, files = 800-880, scripts (ex 992) ignorés "
+        "pour la qualification. Un appel est abandonné uniquement s'il est passé en file sans "
+        "décroché agent."
     )
 
-    st.subheader("Indicateurs clés (appels réussis)")
-    compute_kpis(successful_calls)
+    st.subheader("Indicateurs clés (Call ID avec file ou standard)")
+    compute_kpis(scoped_calls)
 
-    st.subheader("Statistiques par agent (appels réussis)")
-    st.dataframe(stats_by_agent(successful_calls))
+    st.subheader("Statistiques par agent (décroché standard)")
+    st.dataframe(stats_by_agent(scoped_calls))
 
-    st.subheader("Répartition par files d'attente (appels réussis)")
-    st.dataframe(stats_by_queue(queue_calls))
+    st.subheader("Répartition par files d'attente (Call ID)")
+    st.dataframe(stats_by_queue(scoped_calls))
 
-    render_time_charts(standard_calls)
+    render_time_charts(scoped_calls)
 
-    filtered = apply_filters(aggregated_calls)
-    filtered_standard = filtered[filtered.get("StandardInvolved", False)]
-    filtered_queue = filtered[
-        filtered.get("QueueInvolved", False)
-        & filtered.get("RetainedQueueNum").notna()
-        & (filtered.get("RetainedQueueNum") >= 800)
-    ]
-    filtered_successful = filtered_standard[filtered_standard["Outcome"] == "Réussi"]
+    filtered = apply_filters(scoped_calls)
 
     st.subheader("Indicateurs clés (données filtrées)")
-    compute_kpis(filtered_successful)
+    compute_kpis(filtered)
 
     st.subheader("Statistiques par agent (données filtrées)")
-    st.dataframe(stats_by_agent(filtered_successful))
+    st.dataframe(stats_by_agent(filtered))
 
     st.subheader("Répartition par files d'attente (données filtrées)")
-    st.dataframe(stats_by_queue(filtered_queue))
+    st.dataframe(stats_by_queue(filtered))
 
-    render_time_charts(filtered_standard)
+    render_time_charts(filtered)
 
-    st.subheader("Données détaillées (appels agrégés après filtres)")
-    st.dataframe(filtered_successful.head(500))
+    st.subheader("Données détaillées (Call ID agrégés après filtres)")
+    st.dataframe(filtered.head(500))
 
-    export_data(filtered_successful)
+    export_data(filtered)
 
 
 def render_carte92_import_summary(result: Optional[SimpleNamespace]):
