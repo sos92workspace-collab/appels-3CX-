@@ -892,15 +892,70 @@ def load_geojson_92(path: str) -> dict:
     return {}
 
 
+def normalize_carte92_events(events_df: pd.DataFrame) -> pd.DataFrame:
+    """Normalise les événements carte 92 (dates, villes) pour le calcul de durée."""
+
+    if events_df.empty:
+        return events_df
+
+    work = events_df.copy()
+
+    if "created_at" not in work.columns and "Créé le" in work.columns:
+        work["created_at"] = work["Créé le"]
+
+    def _to_paris_datetime(value):
+        if isinstance(value, pd.Timestamp):
+            value = value.to_pydatetime()
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                return value.replace(tzinfo=PARIS_TZ)
+            return value.astimezone(PARIS_TZ)
+        return parse_carte92_datetime(value)
+
+    work["created_at"] = work.get("created_at", pd.Series(dtype=object)).apply(_to_paris_datetime)
+    work = work.dropna(subset=["created_at"])
+
+    if "normalized_city" not in work.columns and "Nom de la ville" in work.columns:
+        work["normalized_city"] = work["Nom de la ville"].apply(normalize_city_name)
+
+    return work
+
+
 def compute_open_percentage_for_city(
     city_events: pd.DataFrame, start_dt: datetime, end_dt: datetime
 ) -> dict:
     """Calcule les métriques d'ouverture pour une ville donnée."""
 
-    total_interval = (end_dt - start_dt).total_seconds()
-    total_interval = max(total_interval, 0)
+    def _to_paris_datetime(value):
+        if isinstance(value, pd.Timestamp):
+            value = value.to_pydatetime()
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                return value.replace(tzinfo=PARIS_TZ)
+            return value.astimezone(PARIS_TZ)
+        return parse_carte92_datetime(value)
 
-    ordered = city_events.sort_values("created_at") if not city_events.empty else pd.DataFrame()
+    if end_dt <= start_dt:
+        return {
+            "percent_open": 0.0,
+            "duration_open": 0.0,
+            "total_interval": 0.0,
+            "event_count": 0,
+            "initial_state": "closed",
+            "has_prior": False,
+            "total_events": len(city_events),
+        }
+
+    total_interval = (end_dt - start_dt).total_seconds()
+
+    work = city_events.copy()
+    if "created_at" not in work.columns and "Créé le" in work.columns:
+        work["created_at"] = work["Créé le"]
+
+    work["created_at"] = work.get("created_at", pd.Series(dtype=object)).apply(_to_paris_datetime)
+    work = work.dropna(subset=["created_at"])
+
+    ordered = work.sort_values("created_at", kind="mergesort") if not work.empty else pd.DataFrame()
     total_events = len(ordered)
     prior_events = ordered[ordered["created_at"] < start_dt] if not ordered.empty else pd.DataFrame()
     has_prior = not prior_events.empty
@@ -923,7 +978,7 @@ def compute_open_percentage_for_city(
         current_state_open = event["action"] == "Ouverture"
         current_time = event_time
 
-    if current_state_open and total_interval > 0:
+    if current_state_open:
         open_seconds += (end_dt - current_time).total_seconds()
 
     percent = (open_seconds / total_interval) if total_interval > 0 else 0.0
@@ -943,6 +998,12 @@ def build_carte92_metrics(events_df: pd.DataFrame, start_dt: datetime, end_dt: d
     """Construit les métriques d'ouverture pour chaque ville importée."""
 
     metrics = {}
+    if events_df.empty:
+        return metrics
+
+    # S'assure que la colonne temporelle est bien présente/typée, même si les
+    # données proviennent d'une source brute (ex : colonne « Créé le » en texte).
+    events_df = normalize_carte92_events(events_df)
     if events_df.empty:
         return metrics
 
@@ -1221,12 +1282,10 @@ def render_ville92_tab():
         "des Hauts-de-Seine sur une fenêtre filtrée."
     )
 
-    events = st.session_state.carte92_events.copy()
+    events = normalize_carte92_events(st.session_state.carte92_events.copy())
     if events.empty:
         st.info("Importez d'abord des événements via l'onglet Import carte 92.")
         return
-
-    events["created_at"] = pd.to_datetime(events["created_at"], utc=True).dt.tz_convert(PARIS_TZ)
 
     min_date = events["created_at"].min().date()
     max_date = events["created_at"].max().date()
