@@ -7,6 +7,7 @@ Cette version fonctionne sans dépendances serveur : tout se passe dans un simpl
 1. Ouvrez `index.html` dans votre navigateur (double-clic depuis l'explorateur de fichiers suffit).
 2. Glissez-déposez un ou plusieurs CSV ou fichiers Excel (XLSX) 3CX dans la zone d'import.
 3. Filtrez par direction, statut, agent ou période, puis consultez :
+   - les indicateurs clés,
    - les statistiques par agent,
    - les graphiques temporels,
    - un extrait des lignes détaillées.
