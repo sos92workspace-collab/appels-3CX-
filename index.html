@@ -1791,25 +1791,20 @@
         return;
       }
 
-      const margin = 40;
+      const margin = 42;
+      const accent = [34, 197, 94];
+      const cardBg = [245, 247, 250];
+      const neutral = [35, 35, 40];
+      const gap = 14;
       const pageWidth = doc.internal.pageSize.getWidth();
       const pageHeight = doc.internal.pageSize.getHeight();
       let cursorY = margin;
 
-      const ensureSpace = (heightNeeded) => {
-        if (cursorY + heightNeeded > pageHeight - margin) {
+      const ensureSpace = (heightNeeded, forceNewPage = false) => {
+        if (forceNewPage || cursorY + heightNeeded > pageHeight - margin) {
           doc.addPage();
           cursorY = margin;
         }
-      };
-
-      const addSectionTitle = (text) => {
-        ensureSpace(24);
-        doc.setFontSize(14);
-        doc.setTextColor(22, 163, 74);
-        doc.text(text, margin, cursorY);
-        cursorY += 18;
-        doc.setTextColor(30);
       };
 
       const addMutedText = (text) => {
@@ -1818,38 +1813,84 @@
         doc.setTextColor(100);
         doc.text(text, margin, cursorY);
         cursorY += 14;
-        doc.setTextColor(30);
+        doc.setTextColor(...neutral);
       };
 
-      doc.setFontSize(16);
-      doc.setTextColor(22, 163, 74);
+      const addSectionTitle = (text) => {
+        ensureSpace(30);
+        doc.setFontSize(13);
+        doc.setTextColor(...accent);
+        doc.setFont(undefined, 'bold');
+        doc.text(text, margin, cursorY);
+        cursorY += 18;
+        doc.setTextColor(...neutral);
+        doc.setFont(undefined, 'normal');
+      };
+
+      const drawCard = (x, y, width, height, title, renderBody) => {
+        doc.setFillColor(...cardBg);
+        doc.setDrawColor(220);
+        doc.roundedRect(x, y, width, height, 8, 8, 'F');
+
+        const padding = 14;
+        let innerY = y + padding + 4;
+        doc.setFontSize(11);
+        doc.setTextColor(...accent);
+        doc.setFont(undefined, 'bold');
+        doc.text(title, x + padding, innerY);
+        innerY += 12;
+        doc.setFont(undefined, 'normal');
+        doc.setTextColor(...neutral);
+        renderBody(x + padding, innerY, width - padding * 2);
+      };
+
+      const calcLinesHeight = (count, lineHeight = 12, padding = 24) => padding * 2 + count * lineHeight + 8;
+      const filtersLines = buildFiltersSummaryLines();
+      const kpis = buildKpisSnapshot();
+
+      doc.setFontSize(18);
+      doc.setTextColor(...accent);
+      doc.setFont(undefined, 'bold');
       doc.text('Export Pilotage – Appels 3CX', margin, cursorY);
-      cursorY += 14;
+      cursorY += 16;
       doc.setFontSize(10);
       doc.setTextColor(100);
+      doc.setFont(undefined, 'normal');
       doc.text(`Généré le ${new Date().toLocaleString('fr-FR')}`, margin, cursorY);
-      cursorY += 18;
-      doc.setTextColor(30);
+      cursorY += 22;
+      doc.setTextColor(...neutral);
       doc.setFontSize(12);
-      doc.text('Filtres actifs', margin, cursorY);
-      cursorY += 12;
-      doc.setFontSize(10);
-      buildFiltersSummaryLines().forEach((line) => {
-        ensureSpace(12);
-        doc.text(`• ${line}`, margin, cursorY);
-        cursorY += 12;
-      });
-      cursorY += 8;
+      doc.setFont(undefined, 'bold');
+      doc.text('Synthèse rapide', margin, cursorY);
+      doc.setFont(undefined, 'normal');
+      cursorY += 14;
 
-      const kpis = buildKpisSnapshot();
-      addSectionTitle('Indicateurs clés');
-      doc.setFontSize(11);
-      kpis.forEach((kpi) => {
-        ensureSpace(13);
-        doc.text(`${kpi.label} : ${kpi.value}`, margin, cursorY);
-        cursorY += 13;
+      const columnWidth = (pageWidth - margin * 2 - gap) / 2;
+      const cardHeight = Math.max(calcLinesHeight(filtersLines.length), calcLinesHeight(kpis.length));
+      ensureSpace(cardHeight + 6);
+
+      drawCard(margin, cursorY, columnWidth, cardHeight, 'Filtres actifs', (x, y) => {
+        doc.setFontSize(10.5);
+        const lineHeight = 12;
+        filtersLines.forEach((line, index) => {
+          doc.text(`• ${line}`, x, y + index * lineHeight);
+        });
       });
-      cursorY += 6;
+
+      drawCard(margin + columnWidth + gap, cursorY, columnWidth, cardHeight, 'Indicateurs clés', (x, y, innerWidth) => {
+        const lineHeight = 14;
+        doc.setFontSize(11);
+        kpis.forEach((kpi, index) => {
+          const lineY = y + index * lineHeight;
+          const valueX = x + innerWidth;
+          doc.text(kpi.label, x, lineY);
+          doc.setFont(undefined, 'bold');
+          doc.text(String(kpi.value), valueX, lineY, { align: 'right' });
+          doc.setFont(undefined, 'normal');
+        });
+      });
+
+      cursorY += cardHeight + 16;
 
       const { scopedExtensions } = buildScopedAggregates();
       const formatLabel = (row) => (row.ext ? `${row.label} (${row.ext})` : row.label);
@@ -1865,10 +1906,12 @@
           startY: cursorY,
           head: [headers],
           body: rows.map(mapper),
-          styles: { fontSize: 9, cellPadding: 5 },
-          headStyles: { fillColor: [22, 163, 74], textColor: 255 },
+          styles: { fontSize: 9, cellPadding: 5, textColor: neutral },
+          headStyles: { fillColor: accent, textColor: 255 },
           alternateRowStyles: { fillColor: [246, 246, 246] },
           margin: { left: margin, right: margin },
+          theme: 'striped',
+          tableWidth: 'auto',
         });
 
         cursorY = doc.lastAutoTable.finalY + 18;
@@ -1901,6 +1944,18 @@
           row.answered ? (row.talking / row.answered).toFixed(1) : '0.0',
         ],
       );
+
+      addMutedText('Les tableaux reflètent uniquement les filtres actifs au moment de l’export.');
+
+      ensureSpace(0, true);
+      doc.setFontSize(12);
+      doc.setTextColor(...neutral);
+      doc.setFont(undefined, 'bold');
+      doc.text('Graphiques', margin, cursorY);
+      doc.setFont(undefined, 'normal');
+      cursorY += 12;
+      addMutedText('Les visualisations sont placées sur une page dédiée pour plus de lisibilité.');
+      cursorY += 4;
 
       const addChartImage = (canvasId, title) => {
         const canvas = document.getElementById(canvasId);
