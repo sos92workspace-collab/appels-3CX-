@@ -1756,11 +1756,29 @@
       return selectedLabels.length ? selectedLabels.join(', ') : fallbackLabel;
     }
 
+    const SUMMARY_PLACEHOLDER = 'Non renseigné';
+
+    function formatSummaryDate(value) {
+      if (!value) return SUMMARY_PLACEHOLDER;
+      const date = new Date(value);
+      if (!(date instanceof Date) || Number.isNaN(date)) return SUMMARY_PLACEHOLDER;
+      const day = String(date.getDate()).padStart(2, '0');
+      const month = String(date.getMonth() + 1).padStart(2, '0');
+      const year = date.getFullYear();
+      return `${day}/${month}/${year}`;
+    }
+
+    function formatSummaryHour(value) {
+      if (value === '' || value === null || value === undefined) return SUMMARY_PLACEHOLDER;
+      const numeric = Number(value);
+      if (!Number.isFinite(numeric)) return SUMMARY_PLACEHOLDER;
+      const hours = Math.min(23, Math.max(0, Math.floor(numeric)));
+      return `${String(hours).padStart(2, '0')}h00`;
+    }
+
     function buildFiltersSummaryLines() {
-      const dateRange = `${startDateInput.value || '—'} → ${endDateInput.value || '—'}`;
-      const hourRange =
-        `${startHourInput.value !== '' ? `${startHourInput.value}h` : '—'}` +
-        ` → ${endHourInput.value !== '' ? `${endHourInput.value}h` : '—'}`;
+      const dateRange = `${formatSummaryDate(startDateInput.value)} au ${formatSummaryDate(endDateInput.value)}`;
+      const hourRange = `${formatSummaryHour(startHourInput.value)} à ${formatSummaryHour(endHourInput.value)}`;
 
       return [
         `Appels filtrés : ${filteredData.length}`,
@@ -1798,6 +1816,8 @@
       const gap = 14;
       const pageWidth = doc.internal.pageSize.getWidth();
       const pageHeight = doc.internal.pageSize.getHeight();
+      const sectionSpacing = 14;
+      const tableSpacing = 24;
       let cursorY = margin;
 
       const ensureSpace = (heightNeeded, forceNewPage = false) => {
@@ -1890,12 +1910,13 @@
         });
       });
 
-      cursorY += cardHeight + 16;
+      cursorY += cardHeight + 26;
 
       const { scopedExtensions } = buildScopedAggregates();
       const formatLabel = (row) => (row.ext ? `${row.label} (${row.ext})` : row.label);
 
       const addTable = (title, rows, headers, mapper) => {
+        cursorY += sectionSpacing;
         addSectionTitle(title);
         if (!rows.length) {
           addMutedText('Aucune donnée disponible pour cette section.');
@@ -1914,7 +1935,7 @@
           tableWidth: 'auto',
         });
 
-        cursorY = doc.lastAutoTable.finalY + 18;
+        cursorY = doc.lastAutoTable.finalY + tableSpacing;
       };
 
       addTable(
