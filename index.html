@@ -15,6 +15,8 @@
   />
   <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <script
     src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
     integrity="sha256-o9N1j7kP6+R2zHob6hJ0u06tR7cqp2p3p3p3v5A4o="
@@ -113,6 +115,16 @@
       transition: transform 0.1s ease;
     }
     button.primary:active { transform: translateY(1px); }
+    button.success {
+      background: #16a34a;
+      color: #06240d;
+      font-weight: 700;
+      border: 1px solid #15803d;
+      cursor: pointer;
+      transition: transform 0.1s ease, background-color 0.1s ease;
+    }
+    button.success:hover { background: #15803d; border-color: #166534; }
+    button.success:active { transform: translateY(1px); }
     textarea {
       width: 100%;
       min-height: 110px;
@@ -265,6 +277,9 @@
     </section>
 
     <section class="tab-content" data-tab="pilotage">
+      <div class="actions" style="justify-content:flex-end; margin-bottom:0.35rem">
+        <button id="export-pdf-btn" class="success" type="button">Exporter la sélection (PDF A4)</button>
+      </div>
       <h2>Statistiques</h2>
       <div class="stats-row">
         <div>
@@ -381,6 +396,7 @@
     const kpiContainer = document.getElementById('kpi-container');
     const standardStats = document.getElementById('standard-stats');
     const queueStats = document.getElementById('queue-stats');
+    const exportPdfBtn = document.getElementById('export-pdf-btn');
     const dataTable = document.getElementById('data-table');
     const saveStatus = document.getElementById('save-status');
     const importList = document.getElementById('import-list');
@@ -520,6 +536,7 @@
     fileInput.addEventListener('change', (event) => handleFiles(event.target.files));
     document.getElementById('apply-filters').addEventListener('click', applyFilters);
     document.getElementById('export-btn').addEventListener('click', exportFiltered);
+    exportPdfBtn?.addEventListener('click', exportPilotagePdf);
     document.getElementById('clear-local').addEventListener('click', clearIndexedDB);
     tabButtons.forEach((btn) => btn.addEventListener('click', () => switchTab(btn.dataset.tabTarget)));
     ville92FileInput?.addEventListener('change', (event) => handleCarte92Files(event.target.files));
@@ -1347,18 +1364,22 @@
       };
     }
 
-    function renderKPIs() {
+    function buildKpisSnapshot() {
       const answeredCalls = callAggregates.length;
       const queueAbandoned = failedCallAggregates.length;
       const inboundAnsweredCalls = callSummaries.filter((call) => call.inbound && call.answered).length;
       const outboundStandardCalls = callSummaries.filter((call) => call.outbound && call.standardPresent).length;
 
-      const kpis = [
+      return [
         { label: 'Appels traités', value: answeredCalls },
         { label: "Nombre d'appels entrants répondus", value: inboundAnsweredCalls },
         { label: 'Appels sortants (standard)', value: outboundStandardCalls },
         { label: 'Appels abandonnés', value: queueAbandoned },
       ];
+    }
+
+    function renderKPIs() {
+      const kpis = buildKpisSnapshot();
 
       kpiContainer.innerHTML = kpis
         .map(
@@ -1725,6 +1746,183 @@
       a.download = 'appels_filtrés.csv';
       a.click();
       URL.revokeObjectURL(url);
+    }
+
+    function describeSelection(selectEl, fallbackLabel) {
+      const selectedLabels = Array.from(selectEl?.selectedOptions || [])
+        .filter((opt) => opt.value !== '__all__')
+        .map((opt) => (opt.textContent || '').trim())
+        .filter(Boolean);
+      return selectedLabels.length ? selectedLabels.join(', ') : fallbackLabel;
+    }
+
+    function buildFiltersSummaryLines() {
+      const dateRange = `${startDateInput.value || '—'} → ${endDateInput.value || '—'}`;
+      const hourRange =
+        `${startHourInput.value !== '' ? `${startHourInput.value}h` : '—'}` +
+        ` → ${endHourInput.value !== '' ? `${endHourInput.value}h` : '—'}`;
+
+      return [
+        `Appels filtrés : ${filteredData.length}`,
+        `Directions : ${describeSelection(directionSelect, 'Toutes les directions')}`,
+        `Statuts : ${describeSelection(statusSelect, 'Tous les statuts')}`,
+        `Utilisateurs : ${describeSelection(agentSelect, 'Tous les utilisateurs')}`,
+        `Files d'attente : ${describeSelection(queueSelect, 'Toutes les files')}`,
+        `Période : ${dateRange}`,
+        `Plage horaire : ${hourRange}`,
+      ];
+    }
+
+    function exportPilotagePdf() {
+      if (!filteredData.length) {
+        alert('Chargez des données filtrées avant de générer le PDF.');
+        return;
+      }
+
+      const { jsPDF } = window.jspdf || {};
+      if (!jsPDF) {
+        alert("La librairie d'export PDF est indisponible dans ce navigateur.");
+        return;
+      }
+
+      const doc = new jsPDF({ orientation: 'portrait', unit: 'pt', format: 'a4' });
+      if (typeof doc.autoTable !== 'function') {
+        alert('Le module PDF (autotable) est introuvable. Vérifiez votre connexion puis réessayez.');
+        return;
+      }
+
+      const margin = 40;
+      const pageWidth = doc.internal.pageSize.getWidth();
+      const pageHeight = doc.internal.pageSize.getHeight();
+      let cursorY = margin;
+
+      const ensureSpace = (heightNeeded) => {
+        if (cursorY + heightNeeded > pageHeight - margin) {
+          doc.addPage();
+          cursorY = margin;
+        }
+      };
+
+      const addSectionTitle = (text) => {
+        ensureSpace(24);
+        doc.setFontSize(14);
+        doc.setTextColor(22, 163, 74);
+        doc.text(text, margin, cursorY);
+        cursorY += 18;
+        doc.setTextColor(30);
+      };
+
+      const addMutedText = (text) => {
+        ensureSpace(14);
+        doc.setFontSize(10);
+        doc.setTextColor(100);
+        doc.text(text, margin, cursorY);
+        cursorY += 14;
+        doc.setTextColor(30);
+      };
+
+      doc.setFontSize(16);
+      doc.setTextColor(22, 163, 74);
+      doc.text('Export Pilotage – Appels 3CX', margin, cursorY);
+      cursorY += 14;
+      doc.setFontSize(10);
+      doc.setTextColor(100);
+      doc.text(`Généré le ${new Date().toLocaleString('fr-FR')}`, margin, cursorY);
+      cursorY += 18;
+      doc.setTextColor(30);
+      doc.setFontSize(12);
+      doc.text('Filtres actifs', margin, cursorY);
+      cursorY += 12;
+      doc.setFontSize(10);
+      buildFiltersSummaryLines().forEach((line) => {
+        ensureSpace(12);
+        doc.text(`• ${line}`, margin, cursorY);
+        cursorY += 12;
+      });
+      cursorY += 8;
+
+      const kpis = buildKpisSnapshot();
+      addSectionTitle('Indicateurs clés');
+      doc.setFontSize(11);
+      kpis.forEach((kpi) => {
+        ensureSpace(13);
+        doc.text(`${kpi.label} : ${kpi.value}`, margin, cursorY);
+        cursorY += 13;
+      });
+      cursorY += 6;
+
+      const { scopedExtensions } = buildScopedAggregates();
+      const formatLabel = (row) => (row.ext ? `${row.label} (${row.ext})` : row.label);
+
+      const addTable = (title, rows, headers, mapper) => {
+        addSectionTitle(title);
+        if (!rows.length) {
+          addMutedText('Aucune donnée disponible pour cette section.');
+          return;
+        }
+
+        doc.autoTable({
+          startY: cursorY,
+          head: [headers],
+          body: rows.map(mapper),
+          styles: { fontSize: 9, cellPadding: 5 },
+          headStyles: { fillColor: [22, 163, 74], textColor: 255 },
+          alternateRowStyles: { fillColor: [246, 246, 246] },
+          margin: { left: margin, right: margin },
+        });
+
+        cursorY = doc.lastAutoTable.finalY + 18;
+      };
+
+      addTable(
+        'Standard (extensions 100-130)',
+        scopedExtensions.standard || [],
+        ['Extension', 'Appels', 'Entrants', 'Sortants', 'Appel traité', "Échecs sortants", 'Temps de parole moyen (s)'],
+        (row) => [
+          formatLabel(row),
+          row.calls,
+          row.inbound || 0,
+          row.outbound || 0,
+          row.answered,
+          row.failures,
+          row.answered ? (row.talking / row.answered).toFixed(1) : '0.0',
+        ],
+      );
+
+      addTable(
+        "Files d'attente",
+        scopedExtensions.queue || [],
+        ['File', 'Appels', 'Répondus', "Abandons (files d'attente)", 'Temps de parole moyen (s)'],
+        (row) => [
+          formatLabel(row),
+          row.calls,
+          row.answered,
+          row.failures,
+          row.answered ? (row.talking / row.answered).toFixed(1) : '0.0',
+        ],
+      );
+
+      const addChartImage = (canvasId, title) => {
+        const canvas = document.getElementById(canvasId);
+        if (!canvas || typeof canvas.toDataURL !== 'function') return;
+
+        const imgData = canvas.toDataURL('image/png');
+        const chartWidth = pageWidth - margin * 2;
+        const ratio = canvas.height && canvas.width ? canvas.height / canvas.width : 0.6;
+        const chartHeight = Math.min(chartWidth * (ratio || 0.6), pageHeight - margin * 2);
+
+        ensureSpace(chartHeight + 32);
+        addSectionTitle(title);
+        ensureSpace(chartHeight + 12);
+        doc.addImage(imgData, 'PNG', margin, cursorY, chartWidth, chartHeight, undefined, 'FAST');
+        cursorY += chartHeight + 12;
+      };
+
+      addChartImage('date-chart', 'Répartition des appels par jour');
+      addChartImage('hour-chart', 'Répartition des appels par heure');
+
+      addMutedText('Les tableaux et graphiques reflètent uniquement les filtres actifs au moment de l’export.');
+      doc.save('pilotage_appels.pdf');
     }
 
     function normalizeCityLabel(value) {
