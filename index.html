@@ -259,10 +259,10 @@
           </div>
         </div>
         <div class="chip">
-          <label>Horaires (heures)</label>
+          <label>Horaires (hh:mm)</label>
           <div class="controls" style="padding:0; gap:0.35rem; flex-wrap:nowrap;">
-            <input id="start-hour" type="number" min="0" max="23" step="1" />
-            <input id="end-hour" type="number" min="0" max="23" step="1" />
+            <input id="start-hour" type="time" min="00:00" max="23:59" step="60" />
+            <input id="end-hour" type="time" min="00:00" max="23:59" step="60" />
           </div>
         </div>
         <div class="chip" style="align-self:flex-end">
@@ -831,6 +831,47 @@
       return Math.ceil(((d - yearStart) / 86400000 + 1) / 7);
     }
 
+    function formatMinutesToTimeInput(minutes, fallback = '') {
+      if (!Number.isFinite(minutes)) return fallback;
+      const bounded = Math.min(23 * 60 + 59, Math.max(0, Math.floor(minutes)));
+      const hours = Math.floor(bounded / 60);
+      const mins = bounded % 60;
+      return `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}`;
+    }
+
+    function parseTimeInputMinutes(value) {
+      if (value === null || value === undefined) return null;
+      const text = String(value).trim();
+      if (!text) return null;
+      const match = text.match(/^(\d{1,2})(?::(\d{2}))?$/);
+      if (!match) return null;
+      const hours = Math.min(23, Math.max(0, Number(match[1])));
+      const minutes = Math.min(59, Math.max(0, Number(match[2] ?? '0')));
+      if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return null;
+      return hours * 60 + minutes;
+    }
+
+    function getRowTimeMinutes(row) {
+      const timeMinutes = row.TimeMinutes;
+      if (timeMinutes !== '' && timeMinutes !== null && timeMinutes !== undefined) {
+        const numeric = Number(timeMinutes);
+        if (Number.isFinite(numeric)) return numeric;
+      }
+
+      const callTime =
+        row.CallTime instanceof Date ? row.CallTime : row.CallTime ? new Date(row.CallTime) : null;
+      if (callTime instanceof Date && !Number.isNaN(callTime)) {
+        return callTime.getHours() * 60 + callTime.getMinutes();
+      }
+
+      if (row.Hour !== '' && row.Hour !== null && row.Hour !== undefined) {
+        const hour = Number(row.Hour);
+        if (Number.isFinite(hour)) return Math.min(23, Math.max(0, hour)) * 60;
+      }
+
+      return null;
+    }
+
     function parseDateTime(value) {
       if (!value) return null;
       if (value instanceof Date && !Number.isNaN(value)) return value;
@@ -878,6 +919,7 @@
         const details = readField(normalized, ['Call Activity Details', 'Details']);
 
         const callTime = parseDateTime(callTimeRaw);
+        const timeMinutes = callTime ? (callTime.getHours() * 60 + callTime.getMinutes()) : null;
         const agent = extractAgent(direction, from, to);
         const queueInfo = findTrackedQueue(from, to, details);
         const extension = agent.ext;
@@ -921,6 +963,8 @@
           Week: callTime ? isoWeek(callTime) : '',
           DayOfWeek: callTime ? callTime.toLocaleDateString('fr-FR', { weekday: 'long' }) : '',
           Hour: callTime ? callTime.getHours() : '',
+          Minute: callTime ? callTime.getMinutes() : '',
+          TimeMinutes: Number.isFinite(timeMinutes) ? timeMinutes : '',
           ImportId: row.__importId || '',
           ImportFileName: row.__fileName || '',
           ImportedAt: row.__importedAt || '',
@@ -1020,8 +1064,10 @@
         if (!endDateInput.value) endDateInput.value = dates[dates.length - 1];
       }
 
-      if (!startHourInput.value) startHourInput.value = 0;
-      if (!endHourInput.value) endHourInput.value = 23;
+      const defaultStartMinutes = parseTimeInputMinutes(startHourInput.value);
+      const defaultEndMinutes = parseTimeInputMinutes(endHourInput.value);
+      startHourInput.value = formatMinutesToTimeInput(defaultStartMinutes ?? 0, '00:00');
+      endHourInput.value = formatMinutesToTimeInput(defaultEndMinutes ?? (23 * 60 + 59), '23:59');
 
       saveStatus.textContent = '';
     }
@@ -1034,8 +1080,8 @@
       const selectedQueues = extractSelection(queueSelect);
       const startDate = startDateInput.value ? new Date(startDateInput.value) : null;
       const endDate = endDateInput.value ? new Date(endDateInput.value) : null;
-      const startHour = startHourInput.value !== '' ? Number(startHourInput.value) : null;
-      const endHour = endHourInput.value !== '' ? Number(endHourInput.value) : null;
+      const startTimeMinutes = parseTimeInputMinutes(startHourInput.value);
+      const endTimeMinutes = parseTimeInputMinutes(endHourInput.value);
 
       filteredData = rawData.filter((row) => {
         const dir = (row.DirectionClean || '').toLowerCase();
@@ -1050,14 +1096,16 @@
         const validDate = dateObj instanceof Date && !Number.isNaN(dateObj);
         const dateOk = !validDate || ((!startDate || dateObj >= startDate) && (!endDate || dateObj <= endDate));
 
-        const hasHour = row.Hour !== '' && row.Hour !== null && row.Hour !== undefined;
-        const hourOk = !hasHour ||
-          (startHour === null && endHour === null) ||
-          ((startHour === null || Number(row.Hour) >= startHour) && (endHour === null || Number(row.Hour) <= endHour));
+        const rowTimeMinutes = getRowTimeMinutes(row);
+        const hasTime = rowTimeMinutes !== null;
+        const timeOk = !hasTime ||
+          (startTimeMinutes === null && endTimeMinutes === null) ||
+          ((startTimeMinutes === null || rowTimeMinutes >= startTimeMinutes) &&
+            (endTimeMinutes === null || rowTimeMinutes <= endTimeMinutes));
 
         const dirOk = !selectedDirections.length || selectedDirections.includes(dir);
         const statusOk = !selectedStatuses.length || selectedStatuses.includes(status);
-        return agentMatch && queueMatch && dateOk && hourOk && dirOk && statusOk;
+        return agentMatch && queueMatch && dateOk && timeOk && dirOk && statusOk;
       });
 
       filteredData = filteredData.filter((row) => {
@@ -1768,17 +1816,18 @@
       return `${day}/${month}/${year}`;
     }
 
-    function formatSummaryHour(value) {
-      if (value === '' || value === null || value === undefined) return SUMMARY_PLACEHOLDER;
-      const numeric = Number(value);
-      if (!Number.isFinite(numeric)) return SUMMARY_PLACEHOLDER;
-      const hours = Math.min(23, Math.max(0, Math.floor(numeric)));
-      return `${String(hours).padStart(2, '0')}h00`;
+    function formatSummaryTime(value) {
+      const minutes = parseTimeInputMinutes(value);
+      if (minutes === null) return SUMMARY_PLACEHOLDER;
+      const bounded = Math.min(23 * 60 + 59, Math.max(0, minutes));
+      const hours = Math.floor(bounded / 60);
+      const mins = bounded % 60;
+      return `${String(hours).padStart(2, '0')}h${String(mins).padStart(2, '0')}`;
     }
 
     function buildFiltersSummaryLines() {
       const dateRange = `${formatSummaryDate(startDateInput.value)} au ${formatSummaryDate(endDateInput.value)}`;
-      const hourRange = `${formatSummaryHour(startHourInput.value)} à ${formatSummaryHour(endHourInput.value)}`;
+      const hourRange = `${formatSummaryTime(startHourInput.value)} à ${formatSummaryTime(endHourInput.value)}`;
 
       return [
         `Appels filtrés : ${filteredData.length}`,
