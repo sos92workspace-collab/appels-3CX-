@@ -587,6 +587,31 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
     if statuses:
         mask &= df["Status"].isin(statuses)
 
+    # Plage horaire (précision à la minute)
+    call_times = df["Call Time"]
+    if call_times.notna().any():
+        times_only = call_times.dt.time
+        min_time = times_only.min()
+        max_time = times_only.max()
+    else:
+        min_time = datetime.strptime("00:00", "%H:%M").time()
+        max_time = datetime.strptime("23:59", "%H:%M").time()
+
+    start_time = st.sidebar.time_input(
+        "Heure de début (HH:MM)", value=min_time, step=60
+    )
+    end_time = st.sidebar.time_input(
+        "Heure de fin (HH:MM)", value=max_time, step=60
+    )
+
+    if call_times.notna().any():
+        times_only = call_times.dt.time
+        if start_time <= end_time:
+            time_mask = times_only.between(start_time, end_time)
+        else:
+            time_mask = (times_only >= start_time) | (times_only <= end_time)
+        mask &= time_mask.fillna(False)
+
     # Filtre texte sur Call Activity Details (optionnel)
     if "Call Activity Details" in df.columns:
         search_text = st.sidebar.text_input("Recherche dans Call Activity Details")
