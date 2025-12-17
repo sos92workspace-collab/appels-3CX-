@@ -1404,6 +1404,8 @@ def render_pilotage_tab():
             "Aucun appel décroché par le standard (extensions 100-130) n'a été détecté sur la période importée."
         )
 
+    export_bar = st.container()
+
     st.info(
         "Toutes les statistiques sont calculées par Call ID unique : regroupement des lignes, "
         "agents du standard = extensions 100-130, files = 800-880, scripts (ex 992) ignorés "
@@ -1449,13 +1451,39 @@ def render_pilotage_tab():
         filtered_queue_stats,
         charts_to_images(filtered_charts),
     )
-    st.download_button(
-        label="Exporter la page Pilotage (PDF)",
-        data=pdf_bytes,
-        file_name="pilotage_appels.pdf",
-        mime="application/pdf",
-        help="Inclut les KPIs, tableaux et graphiques avec les filtres actifs.",
-    )
+
+    with export_bar:
+        st.markdown(
+            """
+            <style>
+            .pilotage-export-bar {
+                display: flex;
+                justify-content: flex-start;
+                margin-bottom: 1rem;
+            }
+            .pilotage-export-bar div[data-testid="stDownloadButton"] > button {
+                background-color: #16a34a;
+                color: white;
+                border: 1px solid #0f5132;
+            }
+            .pilotage-export-bar div[data-testid="stDownloadButton"] > button:hover {
+                background-color: #15803d;
+                border-color: #14532d;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.markdown('<div class="pilotage-export-bar">', unsafe_allow_html=True)
+        st.download_button(
+            label="Exporter la page Pilotage en PDF",
+            data=pdf_bytes,
+            file_name="pilotage_appels.pdf",
+            mime="application/pdf",
+            help="Inclut les KPIs, tableaux et graphiques avec les filtres actifs.",
+            key="pilotage_pdf_download",
+        )
+        st.markdown("</div>", unsafe_allow_html=True)
 
     export_data(filtered)
 
