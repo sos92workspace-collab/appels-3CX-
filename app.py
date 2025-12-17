@@ -23,7 +23,7 @@ import pandas as pd
 import pydeck as pdk
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
 from reportlab.platypus import Image as PlatypusImage
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
@@ -906,9 +906,50 @@ def build_pdf_report(
     styles = getSampleStyleSheet()
     elements = []
 
+    palette = {
+        "primary": colors.HexColor("#0b3954"),
+        "secondary": colors.HexColor("#16a34a"),
+        "muted": colors.HexColor("#f5f7fa"),
+        "border": colors.HexColor("#d0d7de"),
+        "text": colors.HexColor("#111111"),
+    }
+
     title_style = styles["Title"]
     subtitle_style = styles["Heading2"]
     normal_style = styles["Normal"]
+    subtitle_style.textColor = palette["primary"]
+
+    small_caption_style = ParagraphStyle(
+        "SmallCaption",
+        parent=normal_style,
+        fontSize=9,
+        textColor=palette["text"],
+    )
+
+    kpi_value_style = ParagraphStyle(
+        "KpiValue",
+        parent=styles["Heading3"],
+        textColor=palette["primary"],
+        fontSize=13,
+    )
+
+    def _section_divider(label: str) -> None:
+        divider = Table(
+            [[Paragraph(label, subtitle_style)]],
+            colWidths=[A4[0] - 56],
+            style=TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, -1), palette["muted"]),
+                    ("BOX", (0, 0), (-1, -1), 0.75, palette["border"]),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                    ("TOPPADDING", (0, 0), (-1, -1), 6),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                ]
+            ),
+        )
+        elements.append(divider)
+        elements.append(Spacer(1, 10))
 
     elements.append(Paragraph("Pilotage des appels 3CX", title_style))
     elements.append(
@@ -918,39 +959,53 @@ def build_pdf_report(
         )
     )
     elements.append(Paragraph(f"{len(filtered_df)} Call ID après filtres.", normal_style))
+    if "Date" in filtered_df.columns and not filtered_df["Date"].empty:
+        date_min, date_max = filtered_df["Date"].min(), filtered_df["Date"].max()
+        elements.append(
+            Paragraph(
+                f"Période couverte par les filtres : {date_min.strftime('%d/%m/%Y')} → {date_max.strftime('%d/%m/%Y')}",
+                small_caption_style,
+            )
+        )
     elements.append(Spacer(1, 12))
 
     if kpis:
-        elements.append(Paragraph("Indicateurs clés", subtitle_style))
-        kpi_data = [
-            ["Appels analysés", str(kpis["total_calls"])],
-            ["Appels pris par le standard", str(kpis["answered_calls"])],
-            ["Appels abandonnés en file", str(kpis["abandoned_calls"])],
-            ["Durée totale (talking)", f"{int(kpis['total_talking'])} s"],
-            ["Durée totale (ringing)", f"{int(kpis['total_ringing'])} s"],
-            ["Durée moyenne (ringing)", f"{kpis['avg_ringing']:.1f} s"],
-            ["Durée moyenne de conversation", f"{kpis['avg_talking']:.1f} s"],
-            ["Agents distincts (100-130)", str(kpis["distinct_agents"])],
+        _section_divider("Indicateurs clés")
+        kpi_rows = [
+            ("Appels analysés", str(kpis["total_calls"])),
+            ("Appels pris par le standard", str(kpis["answered_calls"])),
+            ("Appels abandonnés en file", str(kpis["abandoned_calls"])),
+            ("Durée totale (talking)", f"{int(kpis['total_talking'])} s"),
+            ("Durée totale (ringing)", f"{int(kpis['total_ringing'])} s"),
+            ("Durée moyenne (ringing)", f"{kpis['avg_ringing']:.1f} s"),
+            ("Durée moyenne de conversation", f"{kpis['avg_talking']:.1f} s"),
+            ("Agents distincts (100-130)", str(kpis["distinct_agents"])),
         ]
 
-        kpi_table = Table(kpi_data, colWidths=[230, 160])
-        kpi_table.setStyle(
-            TableStyle(
+        kpi_table = Table(
+            [[Paragraph(label, normal_style), Paragraph(value, kpi_value_style)] for label, value in kpi_rows],
+            colWidths=[220, 200],
+            style=TableStyle(
                 [
-                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f0f2f6")),
-                    ("TEXTCOLOR", (0, 0), (-1, -1), colors.HexColor("#111111")),
+                    ("BACKGROUND", (0, 0), (-1, -1), colors.white),
+                    ("ROWBACKGROUNDS", (0, 0), (-1, -1), [colors.white, palette["muted"]]),
                     ("ALIGN", (0, 0), (-1, -1), "LEFT"),
-                    ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
-                    ("FONTSIZE", (0, 0), (-1, -1), 10),
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                    ("TOPPADDING", (0, 0), (-1, -1), 6),
                     ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                    ("BOX", (0, 0), (-1, -1), 0.75, palette["border"]),
+                    ("INNERGRID", (0, 0), (-1, -1), 0.25, palette["border"]),
+                    ("LINEABOVE", (0, 0), (-1, -1), 1, palette["primary"]),
                 ]
-            )
+            ),
         )
         elements.append(kpi_table)
-        elements.append(Spacer(1, 16))
+        elements.append(Spacer(1, 20))
 
     def _df_to_table(df: pd.DataFrame, title: str, max_rows: int = 25):
-        elements.append(Paragraph(title, subtitle_style))
+        _section_divider(title)
         if df.empty:
             elements.append(Paragraph("Aucune donnée disponible avec les filtres actuels.", normal_style))
             elements.append(Spacer(1, 12))
@@ -964,14 +1019,15 @@ def build_pdf_report(
         table.setStyle(
             TableStyle(
                 [
-                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0b3954")),
+                    ("BACKGROUND", (0, 0), (-1, 0), palette["primary"]),
                     ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
                     ("ALIGN", (0, 0), (-1, -1), "LEFT"),
                     ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
                     ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
                     ("FONTSIZE", (0, 0), (-1, -1), 8),
                     ("BOTTOMPADDING", (0, 0), (-1, 0), 6),
-                    ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#d0d7de")),
+                    ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, palette["muted"]]),
+                    ("GRID", (0, 0), (-1, -1), 0.25, palette["border"]),
                 ]
             )
         )
@@ -986,7 +1042,7 @@ def build_pdf_report(
     _df_to_table(queue_stats, "Répartition par files d'attente")
 
     if chart_images:
-        elements.append(Paragraph("Graphiques associés", subtitle_style))
+        _section_divider("Graphiques associés")
         for name, label in [
             ("date", "Par date"),
             ("hour", "Par heure"),
@@ -998,7 +1054,21 @@ def build_pdf_report(
             elements.append(Spacer(1, 6))
             image_stream = io.BytesIO(chart_images[name])
             image = PlatypusImage(image_stream, width=6 * inch, height=3.2 * inch)
-            elements.append(image)
+            chart_table = Table(
+                [[image]],
+                colWidths=[A4[0] - 56],
+                style=TableStyle(
+                    [
+                        ("BOX", (0, 0), (-1, -1), 0.5, palette["border"]),
+                        ("BACKGROUND", (0, 0), (-1, -1), colors.white),
+                        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                        ("TOPPADDING", (0, 0), (-1, -1), 6),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                    ]
+                ),
+            )
+            elements.append(chart_table)
             elements.append(Spacer(1, 14))
 
     doc.build(elements)
@@ -1482,6 +1552,9 @@ def render_pilotage_tab():
             mime="application/pdf",
             help="Inclut les KPIs, tableaux et graphiques avec les filtres actifs.",
             key="pilotage_pdf_download",
+        )
+        st.caption(
+            "Le PDF est mis en page pour une diffusion professionnelle et reprend uniquement les données correspondant aux filtres actifs."
         )
         st.markdown("</div>", unsafe_allow_html=True)
 
