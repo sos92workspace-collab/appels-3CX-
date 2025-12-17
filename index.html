@@ -522,6 +522,7 @@
     let charts = {};
     let importLog = [];
     let selectedDate = null;
+    let selectedHours = new Set();
     let carte92Events = [];
     let carte92Geojson = null;
     let ville92Map = null;
@@ -872,6 +873,73 @@
       return null;
     }
 
+    function normalizeCallTime(value) {
+      if (!value) return null;
+      if (value instanceof Date && !Number.isNaN(value)) return value;
+      const parsed = new Date(value);
+      return parsed instanceof Date && !Number.isNaN(parsed) ? parsed : null;
+    }
+
+    function normalizeDateOnly(value) {
+      if (!value) return null;
+      if (value instanceof Date && !Number.isNaN(value)) {
+        return new Date(value.getFullYear(), value.getMonth(), value.getDate());
+      }
+
+      const parts = String(value).split('-').map((part) => Number(part));
+      if (parts.length === 3 && parts.every((p) => Number.isFinite(p))) {
+        const [year, month, day] = parts;
+        return new Date(year, month - 1, day);
+      }
+
+      const parsed = new Date(value);
+      return parsed instanceof Date && !Number.isNaN(parsed)
+        ? new Date(parsed.getFullYear(), parsed.getMonth(), parsed.getDate())
+        : null;
+    }
+
+    function resolveHourValue(hourValue, callTime = null) {
+      if (hourValue !== '' && hourValue !== null && hourValue !== undefined) {
+        const numeric = Number(hourValue);
+        if (Number.isFinite(numeric)) return Math.max(0, Math.min(23, numeric));
+      }
+
+      if (callTime instanceof Date && !Number.isNaN(callTime)) {
+        return callTime.getHours();
+      }
+
+      return null;
+    }
+
+    function matchesSelectedDate(callTime, dateKey = '') {
+      if (!selectedDate) return true;
+
+      const startOfDay = normalizeDateOnly(selectedDate);
+      if (startOfDay) {
+        const endOfDay = new Date(startOfDay);
+        endOfDay.setHours(23, 59, 59, 999);
+
+        if (callTime instanceof Date && !Number.isNaN(callTime)) {
+          return callTime >= startOfDay && callTime <= endOfDay;
+        }
+      }
+
+      return dateKey ? dateKey === selectedDate : false;
+    }
+
+    function matchesSelectedHour(hourValue, callTime = null) {
+      if (!selectedHours.size) return true;
+      const hour = resolveHourValue(hourValue, callTime);
+      return Number.isFinite(hour) && selectedHours.has(hour);
+    }
+
+    function matchesSelection({ callTime, dateKey, hourValue }, { includeHours = true } = {}) {
+      const normalizedCallTime = normalizeCallTime(callTime);
+      const dateOk = matchesSelectedDate(normalizedCallTime, dateKey);
+      const hourOk = !includeHours || matchesSelectedHour(hourValue, normalizedCallTime);
+      return dateOk && hourOk;
+    }
+
     function formatDateKey(date) {
       if (!(date instanceof Date) || Number.isNaN(date)) return '';
       const year = date.getFullYear();
@@ -1134,6 +1202,7 @@
       extensionAggregates = buildExtensionAggregatesFromSummaries(callSummaries);
 
       selectedDate = null;
+      selectedHours = new Set();
 
       renderKPIs();
       renderSelectionAwareViews();
@@ -1151,10 +1220,32 @@
         (row.CallTime instanceof Date ? row.CallTime : row.CallTime ? new Date(row.CallTime) : null);
 
       if (callTime instanceof Date && !Number.isNaN(callTime)) {
-        return row.Date || formatDateKey(callTime);
+        return formatDateKey(callTime);
       }
 
       return row.Date || '';
+    }
+
+    function filterRowsBySelection(rows) {
+      return rows.filter((row) => {
+        const callTime = normalizeCallTime(row.CallTime ?? row.callTime);
+        const dateKey = getRowDate(row, callTime);
+        const hourValue = resolveHourValue(row.Hour, callTime);
+        return matchesSelection({ callTime, dateKey, hourValue });
+      });
+    }
+
+    function filterCallsBySelection({ includeHours = true } = {}) {
+      return callSummaries.filter((call) =>
+        matchesSelection(
+          {
+            callTime: call.callTime,
+            dateKey: call.date || call.Date || '',
+            hourValue: call.hour,
+          },
+          { includeHours },
+        ),
+      );
     }
 
     function filterStandardInvolvedCalls(rows) {
@@ -1509,9 +1600,7 @@
 
     function renderDataTable() {
       const seen = new Set();
-      const scopedRows = selectedDate
-        ? filteredData.filter((row) => getRowDate(row) === selectedDate)
-        : filteredData;
+      const scopedRows = filterRowsBySelection(filteredData);
 
       const dataset = scopedRows
         .filter((row, index) => {
@@ -1575,7 +1664,7 @@
     }
 
     function renderSelectionAwareViews() {
-      const { successCalls, failedCalls, scopedExtensions } = buildScopedAggregates();
+      const { successCalls, failedCalls, hourChartSuccess, hourChartFailure, scopedExtensions } = buildScopedAggregates();
 
       renderCategoryTable(standardStats, scopedExtensions.standard || [], {
         answeredLabel: 'Appel traité',
@@ -1591,17 +1680,19 @@
       });
 
       renderDateChart();
-      renderHourChart(successCalls, failedCalls);
+      renderHourChart(hourChartSuccess, hourChartFailure);
     }
 
     function buildScopedAggregates() {
-      const scopedCalls = selectedDate
-        ? callSummaries.filter((call) => call.date === selectedDate)
-        : callSummaries;
+      const scopedCalls = filterCallsBySelection();
+      const hourChartCalls = filterCallsBySelection({ includeHours: false });
 
       return {
+        scopedCalls,
         successCalls: scopedCalls.filter((call) => call.answered),
         failedCalls: scopedCalls.filter((call) => call.queueAbandoned),
+        hourChartSuccess: hourChartCalls.filter((call) => call.answered),
+        hourChartFailure: hourChartCalls.filter((call) => call.queueAbandoned),
         scopedExtensions: buildExtensionAggregatesFromSummaries(scopedCalls),
       };
     }
@@ -1664,22 +1755,56 @@
     function renderHourChart(successAggregates = callAggregates, failedAggregates = failedCallAggregates) {
       const successByHour = Array(24).fill(0);
       const failuresByHour = Array(24).fill(0);
+      const hourLabels = Array.from({ length: 24 }, (_, i) => i);
 
       successAggregates.forEach((row) => {
-        if (row.hour !== '' && row.hour !== null && row.hour !== undefined) successByHour[Number(row.hour)] += 1;
+        const hour = resolveHourValue(row.hour ?? row.Hour, row.callTime ?? row.CallTime);
+        if (Number.isFinite(hour)) successByHour[hour] += 1;
       });
 
       failedAggregates.forEach((row) => {
-        if (row.hour !== '' && row.hour !== null && row.hour !== undefined) failuresByHour[Number(row.hour)] += 1;
+        const hour = resolveHourValue(row.hour ?? row.Hour, row.callTime ?? row.CallTime);
+        if (Number.isFinite(hour)) failuresByHour[hour] += 1;
       });
 
+      const successColors = hourLabels.map((hour) => (selectedHours.has(hour) ? '#3b82f6' : '#22c55e'));
+      const failureColors = hourLabels.map((hour) => (selectedHours.has(hour) ? '#60a5fa' : '#f97316'));
+
       createChart('hour-chart', 'bar', {
-        labels: Array.from({ length: 24 }, (_, i) => `${i}h`),
+        labels: hourLabels.map((hour) => `${hour}h`),
         datasets: [
-          { label: 'Appels', data: successByHour, backgroundColor: '#22c55e', stack: 'calls' },
-          { label: "Appels abandonnés (files d'attente)", data: failuresByHour, backgroundColor: '#f97316', stack: 'calls' },
+          {
+            label: 'Appels',
+            data: hourLabels.map((hour) => successByHour[hour] || 0),
+            backgroundColor: successColors,
+            borderColor: successColors,
+            borderWidth: 1.2,
+            stack: 'calls',
+          },
+          {
+            label: "Appels abandonnés (files d'attente)",
+            data: hourLabels.map((hour) => failuresByHour[hour] || 0),
+            backgroundColor: failureColors,
+            borderColor: failureColors,
+            borderWidth: 1.2,
+            stack: 'calls',
+          },
         ],
-      }, { scales: { x: { stacked: true }, y: { stacked: true } }, plugins: { legend: { display: true } } });
+      }, {
+        onClick: (_, elements) => {
+          if (!elements.length) return;
+          const clickedHour = hourLabels[elements[0].index];
+          if (selectedHours.has(clickedHour)) {
+            selectedHours.delete(clickedHour);
+          } else {
+            selectedHours.add(clickedHour);
+          }
+          renderSelectionAwareViews();
+          renderDataTable();
+        },
+        scales: { x: { stacked: true }, y: { stacked: true } },
+        plugins: { legend: { display: true } },
+      });
     }
 
     function createChart(id, type, data, options = {}) {
