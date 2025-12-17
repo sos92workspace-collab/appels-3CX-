@@ -1,0 +1,6 @@
+streamlit
+pandas
+altair
+pydeck
+reportlab
+vl-convert-python

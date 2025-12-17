@@ -21,6 +21,12 @@ from zoneinfo import ZoneInfo
 import altair as alt
 import pandas as pd
 import pydeck as pdk
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.units import inch
+from reportlab.platypus import Image as PlatypusImage
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 import streamlit as st
 
 
@@ -602,17 +608,16 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
     return df[mask].copy()
 
 
-def compute_kpis(df: pd.DataFrame):
-    """Calcule les indicateurs clés pour le jeu de données filtré."""
+def summarize_kpis(df: pd.DataFrame) -> Optional[dict]:
+    """Retourne un résumé des indicateurs clés pour réutilisation (UI, export)."""
 
     if df.empty:
-        st.info("Aucune donnée à afficher avec les règles de qualification actuelles.")
-        return
+        return None
 
     answered_df = df[df["AnsweredByStandard"]]
     total_calls = len(df)
     answered_calls = len(answered_df)
-    abandoned_calls = df["AbandonedInQueue"].sum()
+    abandoned_calls = int(df["AbandonedInQueue"].sum())
     distinct_agents = answered_df["AgentExt"].nunique(dropna=True)
 
     total_talking = answered_df["TalkingSeconds"].sum()
@@ -620,20 +625,41 @@ def compute_kpis(df: pd.DataFrame):
     avg_talking = answered_df["TalkingSeconds"].mean() if answered_calls else 0
     avg_ringing = answered_df["RingingSeconds"].mean() if answered_calls else 0
 
+    return {
+        "total_calls": total_calls,
+        "answered_calls": answered_calls,
+        "abandoned_calls": abandoned_calls,
+        "distinct_agents": distinct_agents,
+        "total_talking": total_talking,
+        "total_ringing": total_ringing,
+        "avg_talking": avg_talking,
+        "avg_ringing": avg_ringing,
+    }
+
+
+def compute_kpis(df: pd.DataFrame):
+    """Calcule les indicateurs clés pour le jeu de données filtré."""
+
+    summary = summarize_kpis(df)
+    if not summary:
+        st.info("Aucune donnée à afficher avec les règles de qualification actuelles.")
+        return None
+
     cols = st.columns(6)
-    cols[0].metric("Appels analysés (Call ID)", f"{total_calls}")
-    cols[1].metric("Appels pris par le standard", f"{answered_calls}")
-    cols[2].metric("Appels abandonnés en file", f"{abandoned_calls}")
-    cols[3].metric("Durée totale (talking)", f"{int(total_talking)} s")
-    cols[4].metric("Durée totale (ringing)", f"{int(total_ringing)} s")
-    cols[5].metric("Durée moyenne (ringing)", f"{avg_ringing:.1f} s")
+    cols[0].metric("Appels analysés (Call ID)", f"{summary['total_calls']}")
+    cols[1].metric("Appels pris par le standard", f"{summary['answered_calls']}")
+    cols[2].metric("Appels abandonnés en file", f"{summary['abandoned_calls']}")
+    cols[3].metric("Durée totale (talking)", f"{int(summary['total_talking'])} s")
+    cols[4].metric("Durée totale (ringing)", f"{int(summary['total_ringing'])} s")
+    cols[5].metric("Durée moyenne (ringing)", f"{summary['avg_ringing']:.1f} s")
     st.caption(
-        f"Durée moyenne de conversation: {avg_talking:.1f} s · Agents distincts (100-130): {distinct_agents}"
+        f"Durée moyenne de conversation: {summary['avg_talking']:.1f} s · Agents distincts (100-130): {summary['distinct_agents']}"
     )
     st.caption(
         "Les indicateurs reposent uniquement sur des Call ID uniques : décroché si un agent 100-130 répond, "
         "abandon en file sinon lorsqu'une file 800-880 est présente."
     )
+    return summary
 
 
 def stats_by_agent(df: pd.DataFrame) -> pd.DataFrame:
@@ -713,14 +739,12 @@ def stats_by_queue(df: pd.DataFrame) -> pd.DataFrame:
     return grouped.sort_values("Nombre d'appels", ascending=False)
 
 
-def render_time_charts(df: pd.DataFrame):
-    """Affiche des graphiques de répartition temporelle."""
+def prepare_time_charts(df: pd.DataFrame) -> Optional[dict]:
+    """Construit les graphiques temporels sans les afficher (réutilisable pour l'export)."""
 
     if df.empty:
-        st.info("Aucune donnée filtrée pour afficher des graphiques.")
-        return
+        return None
 
-    st.subheader("Répartition temporelle")
     work = df.copy()
 
     def _prepare_counts(group_col: str, sort_values=None):
@@ -796,9 +820,25 @@ def render_time_charts(df: pd.DataFrame):
         title="Par jour de la semaine",
     )
 
-    st.altair_chart(chart_date, use_container_width=True)
-    st.altair_chart(chart_hour, use_container_width=True)
-    st.altair_chart(chart_dow, use_container_width=True)
+    return {"date": chart_date, "hour": chart_hour, "dow": chart_dow}
+
+
+def render_time_charts(df: pd.DataFrame, charts: Optional[dict] = None):
+    """Affiche des graphiques de répartition temporelle (chart pré-construits acceptés)."""
+
+    if df.empty:
+        st.info("Aucune donnée filtrée pour afficher des graphiques.")
+        return
+
+    charts = charts or prepare_time_charts(df)
+    if not charts:
+        st.info("Impossible de générer les graphiques avec les données actuelles.")
+        return
+
+    st.subheader("Répartition temporelle")
+    st.altair_chart(charts["date"], use_container_width=True)
+    st.altair_chart(charts["hour"], use_container_width=True)
+    st.altair_chart(charts["dow"], use_container_width=True)
 
 
 def export_data(df: pd.DataFrame):
@@ -824,6 +864,146 @@ def export_data(df: pd.DataFrame):
         file_name="appels_filtres.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+
+
+def charts_to_images(charts: Optional[dict]) -> dict:
+    """Convertit les graphiques Altair en images PNG pour le PDF."""
+
+    if not charts:
+        return {}
+
+    images = {}
+    for key, chart in charts.items():
+        try:
+            images[key] = chart.to_image(format="png")
+        except Exception as err:  # pragma: no cover - dépendances externes
+            st.warning(
+                "Échec de la conversion d'un graphique en image pour le PDF. "
+                "Assurez-vous que `vl-convert-python` est installé."
+            )
+            st.error(str(err))
+    return images
+
+
+def build_pdf_report(
+    filtered_df: pd.DataFrame,
+    kpis: Optional[dict],
+    agent_stats: pd.DataFrame,
+    queue_stats: pd.DataFrame,
+    chart_images: dict,
+) -> bytes:
+    """Construit un PDF pro avec KPIs, tableaux et graphiques filtrés."""
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=28,
+        leftMargin=28,
+        topMargin=32,
+        bottomMargin=28,
+    )
+    styles = getSampleStyleSheet()
+    elements = []
+
+    title_style = styles["Title"]
+    subtitle_style = styles["Heading2"]
+    normal_style = styles["Normal"]
+
+    elements.append(Paragraph("Pilotage des appels 3CX", title_style))
+    elements.append(
+        Paragraph(
+            f"Export généré le {datetime.now(PARIS_TZ).strftime('%d/%m/%Y %H:%M')} (filtres actifs)",
+            normal_style,
+        )
+    )
+    elements.append(Paragraph(f"{len(filtered_df)} Call ID après filtres.", normal_style))
+    elements.append(Spacer(1, 12))
+
+    if kpis:
+        elements.append(Paragraph("Indicateurs clés", subtitle_style))
+        kpi_data = [
+            ["Appels analysés", str(kpis["total_calls"])],
+            ["Appels pris par le standard", str(kpis["answered_calls"])],
+            ["Appels abandonnés en file", str(kpis["abandoned_calls"])],
+            ["Durée totale (talking)", f"{int(kpis['total_talking'])} s"],
+            ["Durée totale (ringing)", f"{int(kpis['total_ringing'])} s"],
+            ["Durée moyenne (ringing)", f"{kpis['avg_ringing']:.1f} s"],
+            ["Durée moyenne de conversation", f"{kpis['avg_talking']:.1f} s"],
+            ["Agents distincts (100-130)", str(kpis["distinct_agents"])],
+        ]
+
+        kpi_table = Table(kpi_data, colWidths=[230, 160])
+        kpi_table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f0f2f6")),
+                    ("TEXTCOLOR", (0, 0), (-1, -1), colors.HexColor("#111111")),
+                    ("ALIGN", (0, 0), (-1, -1), "LEFT"),
+                    ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
+                    ("FONTSIZE", (0, 0), (-1, -1), 10),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                ]
+            )
+        )
+        elements.append(kpi_table)
+        elements.append(Spacer(1, 16))
+
+    def _df_to_table(df: pd.DataFrame, title: str, max_rows: int = 25):
+        elements.append(Paragraph(title, subtitle_style))
+        if df.empty:
+            elements.append(Paragraph("Aucune donnée disponible avec les filtres actuels.", normal_style))
+            elements.append(Spacer(1, 12))
+            return
+
+        trimmed = df.head(max_rows).fillna("")
+        table_data = [list(trimmed.columns)] + trimmed.values.tolist()
+        col_count = len(trimmed.columns)
+        col_width = (A4[0] - 56) / col_count
+        table = Table(table_data, colWidths=[col_width] * col_count, repeatRows=1)
+        table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0b3954")),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                    ("ALIGN", (0, 0), (-1, -1), "LEFT"),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
+                    ("FONTSIZE", (0, 0), (-1, -1), 8),
+                    ("BOTTOMPADDING", (0, 0), (-1, 0), 6),
+                    ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#d0d7de")),
+                ]
+            )
+        )
+        elements.append(table)
+        if len(df) > max_rows:
+            elements.append(
+                Paragraph(f"(Premiers {max_rows} enregistrements affichés)", normal_style)
+            )
+        elements.append(Spacer(1, 16))
+
+    _df_to_table(agent_stats, "Statistiques par agent")
+    _df_to_table(queue_stats, "Répartition par files d'attente")
+
+    if chart_images:
+        elements.append(Paragraph("Graphiques associés", subtitle_style))
+        for name, label in [
+            ("date", "Par date"),
+            ("hour", "Par heure"),
+            ("dow", "Par jour de la semaine"),
+        ]:
+            if name not in chart_images:
+                continue
+            elements.append(Paragraph(label, styles["Heading3"]))
+            elements.append(Spacer(1, 6))
+            image_stream = io.BytesIO(chart_images[name])
+            image = PlatypusImage(image_stream, width=6 * inch, height=3.2 * inch)
+            elements.append(image)
+            elements.append(Spacer(1, 14))
+
+    doc.build(elements)
+    buffer.seek(0)
+    return buffer.getvalue()
 
 
 def render_file_summary(files: Iterable, df: pd.DataFrame) -> None:
@@ -1240,23 +1420,42 @@ def render_pilotage_tab():
     st.subheader("Répartition par files d'attente (Call ID)")
     st.dataframe(stats_by_queue(scoped_calls))
 
-    render_time_charts(scoped_calls)
+    scoped_charts = prepare_time_charts(scoped_calls)
+    render_time_charts(scoped_calls, charts=scoped_charts)
 
     filtered = apply_filters(scoped_calls)
 
-    st.subheader("Indicateurs clés (données filtrées)")
-    compute_kpis(filtered)
+    filtered_kpis = compute_kpis(filtered)
+    filtered_agent_stats = stats_by_agent(filtered)
+    filtered_queue_stats = stats_by_queue(filtered)
+    filtered_charts = prepare_time_charts(filtered)
 
     st.subheader("Statistiques par agent (données filtrées)")
-    st.dataframe(stats_by_agent(filtered))
+    st.dataframe(filtered_agent_stats)
 
     st.subheader("Répartition par files d'attente (données filtrées)")
-    st.dataframe(stats_by_queue(filtered))
+    st.dataframe(filtered_queue_stats)
 
-    render_time_charts(filtered)
+    render_time_charts(filtered, charts=filtered_charts)
 
     st.subheader("Données détaillées (Call ID agrégés après filtres)")
     st.dataframe(filtered.head(500))
+
+    st.subheader("Export")
+    pdf_bytes = build_pdf_report(
+        filtered,
+        filtered_kpis,
+        filtered_agent_stats,
+        filtered_queue_stats,
+        charts_to_images(filtered_charts),
+    )
+    st.download_button(
+        label="Exporter la page Pilotage (PDF)",
+        data=pdf_bytes,
+        file_name="pilotage_appels.pdf",
+        mime="application/pdf",
+        help="Inclut les KPIs, tableaux et graphiques avec les filtres actifs.",
+    )
 
     export_data(filtered)
 
