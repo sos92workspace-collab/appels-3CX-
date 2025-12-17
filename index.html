@@ -2085,12 +2085,45 @@
       return new Date(utcDate - offset);
     }
 
-    function combineFiltersToParisDate(dateValue, timeValue) {
-      if (!dateValue) return null;
-      const [year, month, day] = dateValue.split('-').map((v) => Number(v));
-      const [hour = 0, minute = 0] = (timeValue || '00:00').split(':').map((v) => Number(v));
-      if ([year, month, day].some((v) => Number.isNaN(v))) return null;
-      return buildParisDate(year, month, day, Number.isFinite(hour) ? hour : 0, Number.isFinite(minute) ? minute : 0);
+    function buildVille92Intervals({ startDate, endDate, startTime, endTime }) {
+      const parsedStartMinutes = parseTimeInputMinutes(startTime);
+      const parsedEndMinutes = parseTimeInputMinutes(endTime);
+      if (parsedStartMinutes === null || parsedEndMinutes === null) {
+        return { intervals: [], totalSeconds: 0, error: 'Les horaires doivent être renseignés au format hh:mm.' };
+      }
+      if (parsedEndMinutes <= parsedStartMinutes) {
+        return { intervals: [], totalSeconds: 0, error: "L'heure de fin doit être strictement postérieure à l'heure de début." };
+      }
+
+      const [startYear, startMonth, startDay] = (startDate || '').split('-').map((v) => Number(v));
+      const [endYear, endMonth, endDay] = (endDate || '').split('-').map((v) => Number(v));
+      if ([startYear, startMonth, startDay, endYear, endMonth, endDay].some((v) => Number.isNaN(v))) {
+        return { intervals: [], totalSeconds: 0, error: 'Les dates doivent être renseignées (AAAA-MM-JJ).' };
+      }
+
+      const startDayDate = buildParisDate(startYear, startMonth, startDay);
+      const endDayDate = buildParisDate(endYear, endMonth, endDay);
+      if (!(startDayDate instanceof Date) || Number.isNaN(startDayDate) || !(endDayDate instanceof Date) || Number.isNaN(endDayDate)) {
+        return { intervals: [], totalSeconds: 0, error: 'Dates invalides.' };
+      }
+      if (endDayDate < startDayDate) {
+        return { intervals: [], totalSeconds: 0, error: 'La date de fin doit être postérieure ou égale à la date de début.' };
+      }
+
+      const intervals = [];
+      let cursor = new Date(startDayDate);
+      while (cursor <= endDayDate) {
+        const year = cursor.getFullYear();
+        const month = cursor.getMonth() + 1;
+        const day = cursor.getDate();
+        const intervalStart = buildParisDate(year, month, day, Math.floor(parsedStartMinutes / 60), parsedStartMinutes % 60);
+        const intervalEnd = buildParisDate(year, month, day, Math.floor(parsedEndMinutes / 60), parsedEndMinutes % 60);
+        intervals.push({ start: intervalStart, end: intervalEnd });
+        cursor = buildParisDate(year, month, day + 1);
+      }
+
+      const totalSeconds = intervals.reduce((sum, interval) => sum + Math.max((interval.end - interval.start) / 1000, 0), 0);
+      return { intervals, totalSeconds, error: '' };
     }
 
     function parseCarte92Date(value) {
@@ -2258,16 +2291,9 @@
       const startTime = ville92StartTimeInput.value || '00:00';
       const endTime = ville92EndTimeInput.value || '23:59';
 
-      const start = combineFiltersToParisDate(startDate, startTime);
-      const end = combineFiltersToParisDate(endDate, endTime);
-
-      if (!start || !end) {
-        ville92Error.textContent = 'Dates/horaires invalides : les champs de dates sont obligatoires.';
-        return;
-      }
-
-      if (end < start) {
-        ville92Error.textContent = 'La fin doit être postérieure ou égale au début.';
+      const { error } = buildVille92Intervals({ startDate, endDate, startTime, endTime });
+      if (error) {
+        ville92Error.textContent = error;
         return;
       }
 
@@ -2304,9 +2330,9 @@
       return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
     }
 
-    function buildCarte92Metrics(events, start, end) {
+    function buildCarte92Metrics(events, intervals) {
       const metrics = {};
-      const totalInterval = Math.max((end - start) / 1000, 0);
+      const totalInterval = intervals.reduce((sum, interval) => sum + Math.max((interval.end - interval.start) / 1000, 0), 0);
       const grouped = events.reduce((acc, event) => {
         const key = event.normalizedCity;
         acc[key] = acc[key] || [];
@@ -2316,34 +2342,49 @@
 
       Object.entries(grouped).forEach(([cityKey, cityEvents]) => {
         const ordered = cityEvents.slice().sort((a, b) => a.createdAt - b.createdAt);
-        const windowEvents = ordered.filter((e) => e.createdAt >= start && e.createdAt <= end);
-        const priorEvents = ordered.filter((e) => e.createdAt < start);
-        const lastPrior = priorEvents.length ? priorEvents[priorEvents.length - 1] : null;
-        let isOpen = lastPrior ? lastPrior.action === 'Ouverture' : false;
-        let cursor = start;
         let openSeconds = 0;
+        let eventCount = 0;
+        let lastPrior = null;
+        let initialState = 'closed';
+        let pointer = 0;
+        let isOpen = false;
 
-        windowEvents.forEach((event) => {
-          if (isOpen) openSeconds += (event.createdAt - cursor) / 1000;
-          isOpen = event.action === 'Ouverture';
-          cursor = event.createdAt;
+        intervals.forEach((interval, intervalIndex) => {
+          while (pointer < ordered.length && ordered[pointer].createdAt < interval.start) {
+            isOpen = ordered[pointer].action === 'Ouverture';
+            lastPrior = ordered[pointer];
+            pointer += 1;
+          }
+
+          if (intervalIndex === 0) {
+            initialState = isOpen ? 'open' : 'closed';
+          }
+
+          let cursor = interval.start;
+          while (pointer < ordered.length && ordered[pointer].createdAt <= interval.end) {
+            const event = ordered[pointer];
+            if (isOpen) openSeconds += (event.createdAt - cursor) / 1000;
+            isOpen = event.action === 'Ouverture';
+            cursor = event.createdAt;
+            pointer += 1;
+            eventCount += 1;
+          }
+          if (isOpen) openSeconds += (interval.end - cursor) / 1000;
         });
-
-        if (isOpen) openSeconds += (end - cursor) / 1000;
 
         metrics[cityKey] = {
           percentOpen: totalInterval > 0 ? openSeconds / totalInterval : 0,
           durationOpen: openSeconds,
           totalInterval,
-          eventCount: windowEvents.length,
+          eventCount,
           hasPrior: Boolean(lastPrior),
           totalEvents: ordered.length,
-          initialState: lastPrior ? (lastPrior.action === 'Ouverture' ? 'open' : 'closed') : 'closed',
+          initialState,
           cityLabel: cityEvents[0]?.city || cityKey,
         };
       });
 
-      return metrics;
+      return { metrics, totalInterval };
     }
 
     function injectMetricsIntoGeojson(geojson, metrics, totalInterval) {
@@ -2409,7 +2450,7 @@
       return `${percent.toFixed(decimals)}%`;
     }
 
-    function renderVille92SummaryTable(features, metrics) {
+    function renderVille92SummaryTable(features, metrics, totalIntervalSeconds) {
       if (!ville92Summary) return;
 
       const rows = [];
@@ -2428,12 +2469,15 @@
         const percentValue = Number.isFinite(metric.percentOpen) ? metric.percentOpen : 0;
         const events = metric.eventCount ?? metric.totalEvents ?? 0;
         const comment = !events ? 'Aucun événement' : percentValue === 0 ? 'Fermé sur la période' : '';
+        const durationLabel = formatDurationLabel(metric.durationOpen);
+        const totalLabel = formatDurationLabel(totalIntervalSeconds);
 
         rows.push({
           name,
           percent: Math.round(percentValue * 100),
           events,
           comment,
+          duration: `${durationLabel} / ${totalLabel}`,
         });
         seen.add(normalizeCityKey(name));
       });
@@ -2444,11 +2488,14 @@
           const percentValue = Number.isFinite(metric.percentOpen) ? metric.percentOpen : 0;
           const events = metric.eventCount ?? metric.totalEvents ?? 0;
           const comment = !events ? 'Aucun événement' : 'Non cartographiée';
+          const durationLabel = formatDurationLabel(metric.durationOpen);
+          const totalLabel = formatDurationLabel(totalIntervalSeconds);
           rows.push({
             name: metric.cityLabel || cityKey,
             percent: Math.round(percentValue * 100),
             events,
             comment,
+            duration: `${durationLabel} / ${totalLabel}`,
           });
         });
       }
@@ -2465,6 +2512,7 @@
             <tr>
               <th>Ville</th>
               <th>% ouverture</th>
+              <th>Temps ouvert / période</th>
               <th>Événements utilisés</th>
               <th>Commentaire</th>
             </tr>
@@ -2476,6 +2524,7 @@
                   <tr>
                     <td>${row.name}</td>
                     <td>${row.percent}%</td>
+                    <td>${row.duration}</td>
                     <td>${row.events}</td>
                     <td>${row.comment}</td>
                   </tr>`,
@@ -2658,18 +2707,16 @@
         return;
       }
 
-      const start = combineFiltersToParisDate(ville92Filters.startDate, ville92Filters.startTime);
-      const end = combineFiltersToParisDate(ville92Filters.endDate, ville92Filters.endTime);
-      if (!start || !end || end < start) {
-        ville92Error.textContent = 'La période choisie est invalide.';
+      const { intervals, totalSeconds, error } = buildVille92Intervals(ville92Filters);
+      if (error || !intervals.length || totalSeconds <= 0) {
+        ville92Error.textContent = error || 'La période choisie est invalide.';
         renderVille92Aggregates(null, 'Sélectionnez une période valide.');
         ville92Unmatched.textContent = '';
         return;
       }
 
       ensureVille92Map();
-      const totalInterval = Math.max((end - start) / 1000, 0);
-      const metrics = buildCarte92Metrics(carte92Events, start, end);
+      const { metrics, totalInterval } = buildCarte92Metrics(carte92Events, intervals);
       ville92LastMetrics = metrics;
       renderVille92Aggregates(metrics);
 
@@ -2695,7 +2742,7 @@
         if (bounds.isValid()) ville92Map.fitBounds(bounds, { padding: [12, 12] });
       }
       renderVille92Legend();
-      renderVille92SummaryTable(features, metrics);
+      renderVille92SummaryTable(features, metrics, totalInterval);
       ville92Unmatched.textContent = unmatchedCities.length
         ? `Villes non matchées avec le GeoJSON : ${unmatchedCities.join(', ')}`
         : '';
