@@ -1509,7 +1509,11 @@
 
     function renderDataTable() {
       const seen = new Set();
-      const dataset = filteredData
+      const scopedRows = selectedDate
+        ? filteredData.filter((row) => getRowDate(row) === selectedDate)
+        : filteredData;
+
+      const dataset = scopedRows
         .filter((row, index) => {
           const key = `${row['Call ID'] || '__missing'}|${row.CallTime || row.Date || index}`;
           if (seen.has(key)) return false;
@@ -1650,6 +1654,7 @@
           const clickedDate = dateLabels[clickedIndex];
           selectedDate = selectedDate === clickedDate ? null : clickedDate;
           renderSelectionAwareViews();
+          renderDataTable();
         },
         scales: { x: { stacked: true }, y: { stacked: true } },
         plugins: { legend: { display: true } },
