@@ -872,6 +872,14 @@
       return null;
     }
 
+    function formatDateKey(date) {
+      if (!(date instanceof Date) || Number.isNaN(date)) return '';
+      const year = date.getFullYear();
+      const month = String(date.getMonth() + 1).padStart(2, '0');
+      const day = String(date.getDate()).padStart(2, '0');
+      return `${year}-${month}-${day}`;
+    }
+
     function parseDateTime(value) {
       if (!value) return null;
       if (value instanceof Date && !Number.isNaN(value)) return value;
@@ -957,7 +965,7 @@
           DirectionClean: (direction || '').toString().trim(),
           StatusClean: (status || '').toString().trim(),
           CallTime: callTime,
-          Date: callTime ? callTime.toISOString().slice(0, 10) : '',
+          Date: callTime ? formatDateKey(callTime) : '',
           Year: callTime ? callTime.getFullYear() : '',
           Month: callTime ? callTime.getMonth() + 1 : '',
           Week: callTime ? isoWeek(callTime) : '',
@@ -1143,7 +1151,7 @@
         (row.CallTime instanceof Date ? row.CallTime : row.CallTime ? new Date(row.CallTime) : null);
 
       if (callTime instanceof Date && !Number.isNaN(callTime)) {
-        return row.Date || callTime.toISOString().slice(0, 10);
+        return row.Date || formatDateKey(callTime);
       }
 
       return row.Date || '';
@@ -1417,12 +1425,21 @@
       const queueAbandoned = failedCallAggregates.length;
       const inboundAnsweredCalls = callSummaries.filter((call) => call.inbound && call.answered).length;
       const outboundStandardCalls = callSummaries.filter((call) => call.outbound && call.standardPresent).length;
+      const standardAnsweredCalls = callSummaries.filter((call) => call.answeredByStandard);
+      const totalTalkingSeconds = standardAnsweredCalls.reduce(
+        (sum, call) => sum + (Number(call.standardTalkingSeconds || call.talkingSeconds) || 0),
+        0,
+      );
+      const averageTalkingSeconds = standardAnsweredCalls.length
+        ? totalTalkingSeconds / standardAnsweredCalls.length
+        : 0;
 
       return [
         { label: 'Appels traités', value: answeredCalls },
         { label: "Nombre d'appels entrants répondus", value: inboundAnsweredCalls },
         { label: 'Appels sortants (standard)', value: outboundStandardCalls },
         { label: 'Appels abandonnés', value: queueAbandoned },
+        { label: 'Temps moyen de conversation (s)', value: averageTalkingSeconds.toFixed(1) },
       ];
     }
 
@@ -1598,7 +1615,7 @@
       });
 
       const dateLabels = Array.from(new Set([...Object.keys(successByDate), ...Object.keys(failuresByDate)])).sort(
-        (a, b) => new Date(a) - new Date(b),
+        (a, b) => a.localeCompare(b),
       );
       const formattedDateLabels = dateLabels.map((d) => formatChartDateLabel(d));
       const successData = dateLabels.map((d) => successByDate[d] || 0);
@@ -1672,12 +1689,12 @@
 
     function formatChartDateLabel(value) {
       if (!value) return '';
-      const date = new Date(value);
-      if (!(date instanceof Date) || Number.isNaN(date)) return value;
-      const day = String(date.getDate()).padStart(2, '0');
-      const month = String(date.getMonth() + 1).padStart(2, '0');
-      const year = date.getFullYear();
-      return `${day}:${month}:${year}`;
+      const parts = String(value).split('-');
+      if (parts.length === 3) {
+        const [year, month, day] = parts;
+        return `${day.padStart(2, '0')}:${month.padStart(2, '0')}:${year}`;
+      }
+      return value;
     }
 
     function switchTab(target) {
